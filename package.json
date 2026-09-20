@@ -27,5 +27,13 @@
     "eslint-config-next": "16.3.5",
     "tailwindcss": "^4",
     "typescript": "^5"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Adityakhalkar/JevEye.git"
+  },
+  "homepage": "https://github.com/Adityakhalkar/JevEye#readme",
+  "bugs": {
+    "url": "https://github.com/Adityakhalkar/JevEye/issues"
   }
 }

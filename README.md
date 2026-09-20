@@ -4,6 +4,7 @@
 
 <p align="center">
   <img src="docs/jeveye-flowers.png" alt="JevEye answering a question about a field of poppies and camomile: what Jev read into the question, the vision probes, the answer, and the fact sheet behind it" width="820">
+  <br><sub>Photograph by JackyM59, <a href="https://creativecommons.org/licenses/by-sa/4.0">CC BY-SA 4.0</a>, via Wikimedia Commons. See <a href="fixtures/README.md">fixtures</a>.</sub>
 </p>
 
 [Jev](https://docs.typesafe.ai) accepts text only — *"State must be a string, JSON object, or array of text values. Images, audio, and video are not supported (yet)."* JevEye is the layer that lets you ask it about a photograph anyway, without pretending the model can see.

@@ -11,9 +11,10 @@ type Status = "idle" | "loading" | "planning" | "probing" | "judging" | "done" |
 
 const EXAMPLES = [
   "what type of flower is it?",
-  "which flowers are in this field?",
-  "how many people are there?",
   "is there a dog in this photo?",
+  "how much of this is covered in flowers?",
+  "do these plants look healthy?",
+  "is this photo blurry?",
 ];
 
 export default function Page() {
@@ -166,8 +167,18 @@ export default function Page() {
       {plan && (
         <Block title="jev reads the question">
           <Row k="on topic" v={plan.onTopic.toFixed(2)} />
-          <Row k="vocabulary" v={`${plan.vocabulary} (${plan.vocabularyConfidence.toFixed(2)}) — ${VOCABULARIES[plan.vocabulary].labels.length} labels`} />
           <Row k="reading" v={`${plan.reading} (${plan.readingConfidence.toFixed(2)})`} />
+          {plan.reading === "rating" && plan.scale ? (
+            <Row k="scale" v={`${plan.scale} (${plan.scaleConfidence?.toFixed(2)})`} />
+          ) : (
+            <Row
+              k="vocabulary"
+              v={`${plan.vocabulary} (${plan.vocabularyConfidence.toFixed(2)}) — ${VOCABULARIES[plan.vocabulary].labels.length} labels`}
+            />
+          )}
+          {plan.subject && (
+            <Row k="subject" v={`${plan.subject} (${plan.subjectConfidence?.toFixed(2)})`} />
+          )}
           <Row k="cost" v={`$${plan.usdCost.toFixed(6)} · ${plan.inputTokens} tokens`} />
         </Block>
       )}
@@ -206,14 +217,7 @@ export default function Page() {
               confidence {judgment.confidence.toFixed(2)}
             </span>
           </p>
-          <p className="mt-2 text-neutral-300">
-            {facts.tilesLow === facts.tilesHigh
-              ? `Found in ${facts.tilesWithSubject} of ${facts.tilesExamined} tiles.`
-              : `Found in most likely ${facts.tilesWithSubject} of ${facts.tilesExamined} tiles, between ${facts.tilesLow} and ${facts.tilesHigh}.`}{" "}
-            {judgment.mixed > 0.5
-              ? `More than one kind covers a meaningful part of the picture (${judgment.mixed.toFixed(2)}), so this is not a single-kind image.`
-              : `Jev puts the odds of a mixed picture at ${judgment.mixed.toFixed(2)}.`}
-          </p>
+          <p className="mt-2 text-neutral-300">{explain(facts, judgment)}</p>
           <Row k="support" v={judgment.support.toFixed(2)} />
           <Row k="cost" v={`$${judgment.usdCost.toFixed(6)} · ${judgment.inputTokens} tokens`} />
         </Block>
@@ -222,34 +226,78 @@ export default function Page() {
       {facts && (
         <details className="rounded-lg border border-neutral-800 bg-neutral-900/40">
           <summary className="cursor-pointer px-4 py-3 text-neutral-300">
-            what I saw ({facts.tilesExamined} tiles examined)
+            what I saw ({facts.kind})
           </summary>
           <div className="space-y-1 border-t border-neutral-800 px-4 py-3">
-            <Row k="grid" v={`${facts.grid.cols}×${facts.grid.rows} — ${facts.tilesExamined} tiles`} />
-            <Row
-              k="tiles holding the subject"
-              v={`${facts.tilesWithSubject} (90% between ${facts.tilesLow} and ${facts.tilesHigh})`}
-            />
-            {facts.tallies.map((t) => (
-              <Row
-                key={t.label}
-                k={t.label}
-                v={`${t.count} tiles · mean ${t.meanConfidence.toFixed(2)} · weight ${t.weight.toFixed(2)}`}
-              />
-            ))}
-            {facts.unknownTiles > 0 && (
-              <Row k="tiles that could not be named" v={String(facts.unknownTiles)} />
+            {facts.kind !== "rating" && (
+              <>
+                <Row
+                  k="grid"
+                  v={`${facts.grid.cols}×${facts.grid.rows} — ${facts.tilesExamined} tiles`}
+                />
+                <Row
+                  k="tiles holding the subject"
+                  v={`${facts.tilesWithSubject} (90% between ${facts.tilesLow} and ${facts.tilesHigh})`}
+                />
+              </>
             )}
-            {facts.wholeImage && (
-              <Row
-                k="whole-image reading"
-                v={`${facts.wholeImage.label} · ${facts.wholeImage.confidence.toFixed(2)}`}
-              />
+
+            {facts.kind === "identify" && (
+              <>
+                {facts.tallies.map((t) => (
+                  <Row
+                    key={t.label}
+                    k={t.label}
+                    v={`${t.count} tiles · mean ${t.meanConfidence.toFixed(2)} · weight ${t.weight.toFixed(2)}`}
+                  />
+                ))}
+                {facts.unknownTiles > 0 && (
+                  <Row k="tiles that could not be named" v={String(facts.unknownTiles)} />
+                )}
+                {facts.wholeImage && (
+                  <Row
+                    k="whole-image reading"
+                    v={`${facts.wholeImage.label} · ${facts.wholeImage.confidence.toFixed(2)}`}
+                  />
+                )}
+              </>
             )}
+
+            {facts.kind === "presence" && (
+              <>
+                <Row k="sentence scored" v={facts.statement} />
+                <Row
+                  k="whole image matched it"
+                  v={facts.probability === null ? "unknown — abstained" : facts.probability.toFixed(2)}
+                />
+                <Row
+                  k="tiles also matching"
+                  v={`${facts.tilesMatchingSubject} of ${facts.tilesChecked} checked (${facts.tilesExamined - facts.tilesChecked} held nothing)`}
+                />
+              </>
+            )}
+
+            {facts.kind === "count" && <Row k="counted" v={`tiles holding ${facts.noun}s`} />}
+
+            {facts.kind === "rating" && (
+              <>
+                <Row k="scale" v={facts.scale} />
+                <Row k="position" v={`${facts.position.toFixed(2)} of 1.00`} />
+                <Row
+                  k="reading reliability"
+                  v={facts.confidence === null ? "unknown — abstained" : facts.confidence.toFixed(2)}
+                />
+                {facts.levels.map((l, i) => (
+                  <Row key={l} k={`level ${i}`} v={l} />
+                ))}
+              </>
+            )}
+
             {Object.entries(facts.context).map(([k, v]) => (
               <Row key={k} k={k} v={v === null ? "unknown — abstained" : v.toFixed(2)} />
             ))}
             <Row k="image" v={`${facts.imageSize.width}×${facts.imageSize.height}`} />
+            <Row k="vision time" v={`${facts.elapsedMs} ms, on this machine`} />
             {!CALIBRATION.fitted && (
               <p className="pt-2 text-xs text-amber-500/80">
                 Calibration is unfitted: these confidences are raw model outputs and are probably
@@ -267,6 +315,37 @@ export default function Page() {
       )}
     </main>
   );
+}
+
+/** One plain sentence about what the evidence was, in the reading's own terms. */
+function explain(facts: FactSheet, judgment: Judgment): string {
+  switch (facts.kind) {
+    case "identify": {
+      const spread =
+        facts.tilesLow === facts.tilesHigh
+          ? `Found in ${facts.tilesWithSubject} of ${facts.tilesExamined} tiles.`
+          : `Found in most likely ${facts.tilesWithSubject} of ${facts.tilesExamined} tiles, between ${facts.tilesLow} and ${facts.tilesHigh}.`;
+      const mixed =
+        judgment.mixed === undefined
+          ? ""
+          : judgment.mixed > 0.5
+            ? ` More than one kind covers a meaningful part of the picture (${judgment.mixed.toFixed(2)}), so this is not a single-kind image.`
+            : ` Jev puts the odds of a mixed picture at ${judgment.mixed.toFixed(2)}.`;
+      return spread + mixed;
+    }
+    case "presence":
+      return `The sentence "${facts.statement}" matched the whole image at ${
+        facts.probability === null ? "a level too low to report" : facts.probability.toFixed(2)
+      }, and ${facts.tilesMatchingSubject} of the ${facts.tilesChecked} tiles worth checking matched it too.`;
+    case "count":
+      return `Counted over tiles, not individuals: ${facts.tilesWithSubject} of ${facts.tilesExamined} hold ${facts.noun}s, between ${facts.tilesLow} and ${facts.tilesHigh} with 90% probability.`;
+    case "rating":
+      return `Read along the "${facts.scale}" scale, the picture landed at ${facts.position.toFixed(2)} of 1.00, ${
+        facts.confidence === null
+          ? "but the reading was too uncertain to report a reliability"
+          : `with reading reliability ${facts.confidence.toFixed(2)}`
+      }.`;
+  }
 }
 
 function Block({ title, children }: { title: string; children: React.ReactNode }) {

@@ -14,7 +14,18 @@ Two layers, strict boundary:
 - **The vision layer** answers only questions of fact. Is this a flower; which of these 102 species; how much of the picture holds one. Every answer carries a probability, or abstains. It never judges.
 - **Jev** judges. It reads the facts as text, with every confidence still attached — `corn poppy: 3 tiles, mean 0.32, weight 0.96` — and draws the conclusion. It never sees pixels.
 
-The loop closes because Jev also decides *what to look for*: given your question it picks the label set and the reading before a single pixel is touched.
+The loop closes because Jev decides *what to look for*. Before a single pixel is touched it reads your question into one of six **readings**, and the reading chooses which probes run:
+
+| You ask | Reading | What actually runs |
+|---|---|---|
+| "what type of flower is it?" | `only` | coverage, then the classifier over tiles |
+| "which flowers are in this field?" | `every` | same, judged for multiplicity |
+| "is there a dog in this photo?" | `presence` | Jev picks `dog` from the label set; one open-vocabulary sentence is scored |
+| "how much is covered in flowers?" | `count` | coverage only — the classifier never runs |
+| "do these plants look healthy?" | `rating` | an ordered scale; no label set involved at all |
+| "is this photo blurry?" | `rating` | the `sharpness` scale |
+
+Two of those paths never touch the 182 labels. `detect` and `score` take **arbitrary sentences**, so presence and rating are open-vocabulary — the closed set only constrains *naming*.
 
 ```text
 drop field.jpg  +  "what type of flower is it?"
@@ -66,7 +77,9 @@ vercel deploy
 | Layer | Where | What |
 |---|---|---|
 | CLIP ViT-B/32, q8 ONNX | the browser, via transformers.js on WebGPU (WASM fallback) | `detect`, `choose`, `score`, `coverage` |
-| Jev, via `@typesafe-ai/sdk` | `/api/plan`, `/api/judge` | reads the question; judges the fact sheet |
+| Jev, via `@typesafe-ai/sdk` | `/api/plan`, `/api/judge` | picks the reading, label set, subject and scale; judges the fact sheet |
+
+Each reading produces a differently shaped fact sheet, and each gets its own question of Jev — naming is a `choice`, presence is a `noul`, rating is a `score`. The one constant is that Jev is always told how thin the evidence was, which is why a "no" can come back at 0.66 with support 0.30.
 
 **The image never leaves the browser.** Only the fact sheet — a few hundred bytes of JSON — crosses the network. The API key is the reason a server exists at all.
 
@@ -83,7 +96,7 @@ What is JevEye's own is the arrangement: the strict split between scoring facts 
 Jev choosing the probes before any pixel is read, the chance-relative abstention rule, and routing
 tile presences through a Poisson-binomial so counts arrive as intervals.
 
-Label sets are shipped, never generated: [Oxford Flowers-102](https://www.robots.ox.ac.uk/~vgg/data/flowers/102/) and the 80 COCO categories. Jev picks which one a question is about. Nothing in this system generates text.
+Label sets **and rating scales** are shipped, never generated — Jev picks which one applies, exactly as it picks a vocabulary: [Oxford Flowers-102](https://www.robots.ox.ac.uk/~vgg/data/flowers/102/) and the 80 COCO categories. Jev picks which one a question is about. Nothing in this system generates text.
 
 ## What it does not do
 
@@ -93,6 +106,7 @@ Stated plainly, because the whole point is honest uncertainty.
 - **It counts coverage, not instances.** The original design used OWL-ViT for `locate` and `count`. Its `class_head` Cast node has no ONNX Runtime Web implementation at q8, q4f16 or fp16, and only the 583 MB fp32 graph could load — too much for a browser. So the picture is cut into a 4×4 grid and each tile examined separately. "14 of 16 tiles" measures how much of the image a kind covers, not how many flowers there are.
 - **The grid is coarse.** A flower straddling two tiles is seen twice; one much smaller than a tile is diluted by its background.
 - **`compare` is not implemented.** Two-image questions ("is this the same plant?") are designed but not built.
+- **Rating uses five shipped scales** — health, sharpness, crowding, damage, lighting. Ask along a scale that isn't there and it falls back to naming, because Jev cannot write a new scale.
 - **Out-of-vocabulary is the real hazard.** Show it a protea and CLIP will reach for the nearest of its 102 labels. The margin-and-chance abstention rule is what keeps that from becoming a confident lie, and it is exactly the part that fitting would make trustworthy.
 - **Domain drift.** The label sets and thresholds suit web-like photographs. Satellite, medical, document and screenshot images will be wrong in ways the confidences will not warn you about.
 
@@ -110,6 +124,7 @@ Covers the calibration arithmetic: temperature scaling, the Poisson-binomial ove
 src/lib/calibration.ts   temperatures, abstention rules, Poisson-binomial
 src/lib/vision.ts        the primitives and the fact sheet, browser-side
 src/lib/vocab/           shipped label sets
+src/lib/scales.ts        shipped rating scales
 src/app/api/plan/        Jev reads the question
 src/app/api/judge/       Jev judges the fact sheet
 src/app/page.tsx         drop zone, chat bar, answer, fact sheet

@@ -1,3 +1,4 @@
+import type { ScaleId } from "./scales";
 import type { VocabularyId } from "./vocab";
 
 /** What Jev decided the question means, before any pixel is touched. */
@@ -6,26 +7,37 @@ export type Plan = {
   onTopic: number;
   /** Set to false when `onTopic` is below the gate; no probes run. */
   proceed: boolean;
-  vocabulary: VocabularyId;
-  vocabularyConfidence: number;
-  /** Which shape of answer the question wants. */
+  /** Which shape of answer the question wants — and which probes will run. */
   reading: Reading;
   readingConfidence: number;
-  /** Open-vocabulary detection prompt, chosen from the vocabulary's labels. */
+  vocabulary: VocabularyId;
+  vocabularyConfidence: number;
+  /** Open-vocabulary detection prompt for the vocabulary's instances. */
   instanceNoun: string;
+  /** For `presence`: the one label the question asks about, chosen from the vocabulary. */
+  subject: string | null;
+  subjectConfidence: number | null;
+  /** For `rating`: the scale the question is asking along. */
+  scale: ScaleId | null;
+  scaleConfidence: number | null;
   usdCost: number;
   inputTokens: number;
 };
 
-export type Reading = "dominant" | "only" | "every" | "presence" | "count";
+export type Reading = "only" | "dominant" | "every" | "presence" | "count" | "rating";
 
 export const READINGS: Record<Reading, string> = {
-  dominant: "Which kind is the most common one in the picture",
   only: "Which single kind the picture is of, assuming there is only one",
+  dominant: "Which kind is the most common one in the picture",
   every: "Which kinds appear in the picture at all",
   presence: "Whether one particular kind is present or absent",
-  count: "How many of something there are",
+  count: "How many of something there are, or how much of the picture it fills",
+  rating:
+    "How much of some quality the picture shows, along a scale — how healthy, how blurry, how crowded, how damaged, how well lit",
 };
+
+/** Readings that need the label set, and so run the classifier over tiles. */
+export const IDENTIFYING: ReadonlySet<Reading> = new Set<Reading>(["only", "dominant", "every"]);
 
 /**
  * A per-label tally over the tiles that hold the subject.
@@ -35,32 +47,73 @@ export const READINGS: Record<Reading, string> = {
  */
 export type Tally = { label: string; count: number; meanConfidence: number; weight: number };
 
-/** Everything the vision layer saw, in the form Jev reads it. */
-export type FactSheet = {
+/** Shared by every fact sheet, whatever the reading. */
+type Observed = {
+  imageSize: { width: number; height: number };
+  elapsedMs: number;
+  /** Free-text presence probes, or null where the detector abstained. */
+  context: Record<string, number | null>;
+};
+
+/** How much of the picture holds the subject, as a distribution over tiles. */
+type Coverage = {
   grid: { cols: number; rows: number };
   tilesExamined: number;
-  /** Most likely number of tiles holding the subject. */
   tilesWithSubject: number;
   tilesLow: number;
   tilesHigh: number;
-  tallies: Tally[];
-  /** Tiles whose best label fell below the choose floor. */
-  unknownTiles: number;
-  /** Whole-image reading, used when no tile held the subject. */
-  wholeImage: { label: string; confidence: number } | null;
-  /** Calibrated presence probabilities for context, or null when abstained. */
-  context: Record<string, number | null>;
-  /** Share of identified tiles held by the leading label, 0..1. */
-  dominantShare: number | null;
-  imageSize: { width: number; height: number };
-  elapsedMs: number;
 };
 
+export type IdentifyFacts = Observed &
+  Coverage & {
+    kind: "identify";
+    tallies: Tally[];
+    /** Tiles whose best label fell below the choose bar. */
+    unknownTiles: number;
+    /** Whole-image reading, used when no tile held the subject. */
+    wholeImage: { label: string; confidence: number } | null;
+    /** Share of identified weight held by the leading label, 0..1. */
+    dominantShare: number | null;
+  };
+
+export type PresenceFacts = Observed &
+  Coverage & {
+    kind: "presence";
+    subject: string;
+    /** The sentence CLIP actually scored. */
+    statement: string;
+    /** Whole-image presence probability, or null when the detector abstained. */
+    probability: number | null;
+    /** Tiles that also matched the statement, out of those actually checked. */
+    tilesMatchingSubject: number;
+    /** Only tiles that held something were checked, so this is the real denominator. */
+    tilesChecked: number;
+  };
+
+export type CountFacts = Observed & Coverage & { kind: "count"; noun: string };
+
+export type RatingFacts = Observed & {
+  kind: "rating";
+  scale: ScaleId;
+  levels: readonly string[];
+  /** 0 = lowest level, 1 = highest. */
+  position: number;
+  /** Null when the scale could not be read reliably. */
+  confidence: number | null;
+};
+
+export type FactSheet = IdentifyFacts | PresenceFacts | CountFacts | RatingFacts;
+
 export type Judgment = {
+  /** The label, the verdict, or the level name — whatever the reading asked for. */
   answer: string;
   confidence: number;
-  probabilities: Record<string, number>;
-  mixed: number;
+  /** Present for readings judged as a choice. */
+  probabilities?: Record<string, number>;
+  /** Present for `identify`: whether more than one kind is meaningfully there. */
+  mixed?: number;
+  /** Present for `presence`: Jev's own probability that the subject is there. */
+  present?: number;
   support: number;
   supportLegend: Record<string, unknown>;
   usdCost: number;

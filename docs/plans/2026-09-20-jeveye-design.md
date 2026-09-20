@@ -100,6 +100,42 @@ End to end in a real browser against live Jev, on a mixed field of poppies and c
 
 Jev reads "what type of flower **is it**" as `only` rather than `dominant` — better English than the design assumed. The mixed field then surfaces through the `mixed` noul instead of through the reading.
 
+## Follow-up: the reading now drives the probes
+
+The first cut had a gap between what this document claimed and what ran. `probe()`
+ignored the reading entirely — the same three probes fired whatever Jev decided the
+question meant, and the reading only coloured the judging. `score` was implemented,
+exported, and never called.
+
+Closed by making the reading select the probe set, which also makes the two
+open-vocabulary primitives reachable:
+
+| Reading | Probes | Cost |
+|---|---|---|
+| `only` / `dominant` / `every` | coverage + classifier over tiles | ~4.9 s |
+| `presence` | coverage + one `detect` on a Jev-chosen subject | ~3.0 s |
+| `count` | coverage only | ~2.7 s |
+| `rating` | one `score` over a shipped scale | ~2.6 s |
+
+Two consequences worth recording. Readings that skip the 102-way classifier are
+roughly twice as fast. And `presence` and `rating` never touch a label set, so they
+work on subjects no vocabulary covers — the closed set constrains naming, not
+looking.
+
+Scales had to become shipped data for the same reason vocabularies did: Jev picks
+one, it cannot write one. Five ship: health, sharpness, crowding, damage, lighting.
+`presence` needs a second Jev call, because the labels to choose a subject from are
+only known once the first call has settled the vocabulary.
+
+Verified in-browser on the same photograph: `rating`/health landed at 0.77 with Jev
+answering "healthy, vigorous plant" at 0.63; `presence`/dog returned "no — no dog" at
+0.66 with the detector abstaining and 0 of 5 checked tiles matching; `count` gave 14
+of 16 tiles at dependability 0.34.
+
+One bug the work surfaced and fixed: presence reported matching tiles out of 16 when
+only the 5 occupied tiles were ever checked. A denominator that flatters the evidence
+is exactly the failure this project exists to avoid.
+
 ## Not built
 
 - Fitted calibration, and the offline script that would produce it.

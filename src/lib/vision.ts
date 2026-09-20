@@ -25,7 +25,8 @@ import {
   floorOrUnknown,
   poissonBinomial,
 } from "./calibration";
-import type { FactSheet, Plan } from "./types";
+import { SCALES } from "./scales";
+import { IDENTIFYING, type FactSheet, type Plan } from "./types";
 import { VOCABULARIES } from "./vocab";
 
 env.allowLocalModels = false;
@@ -214,9 +215,13 @@ export async function coverage(
 // ------------------------------------------------------------- the fact sheet
 
 /**
- * Run the probes Jev's plan calls for and assemble what was seen.
+ * Run the probes the reading calls for and assemble what was seen.
  *
- * Nothing here interprets the question. It gathers facts; Jev draws conclusions.
+ * The reading Jev picked decides which probes run, not just how the answer is
+ * phrased: naming a kind needs the classifier over tiles, checking for one
+ * thing needs a single open-vocabulary statement, and rating needs an ordered
+ * scale. Nothing here interprets the question — it gathers facts, and Jev draws
+ * the conclusion.
  */
 export async function probe(
   image: RawImage,
@@ -224,15 +229,98 @@ export async function probe(
   onStage: (stage: string) => void,
 ): Promise<FactSheet> {
   const started = performance.now();
-  const vocab = VOCABULARIES[plan.vocabulary];
   const noun = plan.instanceNoun;
 
+  /** Two free-text probes worth having whatever the question was. */
+  const contextProbes = async (statements: string[]) => {
+    onStage("context probes");
+    const values = await Promise.all(statements.map((t) => detect(image, t)));
+    return Object.fromEntries(statements.map((t, i) => [t, values[i]])) as Record<
+      string,
+      number | null
+    >;
+  };
+
+  const common = (elapsedStart: number) => ({
+    imageSize: { width: image.width, height: image.height },
+    elapsedMs: Math.round(performance.now() - elapsedStart),
+  });
+
+  // ---- rating: one ordered scale over the whole image, no vocabulary at all
+  if (plan.reading === "rating" && plan.scale) {
+    const scale = SCALES[plan.scale];
+    onStage(`score the "${scale.id}" scale over ${scale.levels.length} levels`);
+    const { position, confidence } = await score(image, scale.levels);
+    const context = await contextProbes([
+      "a clear photograph of a single obvious subject",
+      `a photograph where the ${scale.id} of the subject is easy to judge`,
+    ]);
+    return {
+      kind: "rating",
+      scale: scale.id,
+      levels: scale.levels,
+      position,
+      confidence,
+      context,
+      ...common(started),
+    };
+  }
+
+  // Every remaining reading wants to know how much of the picture holds the subject.
   onStage(`coverage "${noun}" over a ${GRID_COLS}×${GRID_ROWS} grid`);
   const { tiles: grid, presence, mode, low, high } = await coverage(image, noun);
-
+  const coverageFacts = {
+    grid: { cols: GRID_COLS, rows: GRID_ROWS },
+    tilesExamined: grid.length,
+    tilesWithSubject: mode,
+    tilesLow: low,
+    tilesHigh: high,
+  };
   const floor = CALIBRATION.primitives.coverage.reliabilityFloor;
   const occupied = grid.filter((_, i) => presence[i] >= floor);
 
+  // ---- count: coverage is the answer, so skip the classifier entirely
+  if (plan.reading === "count") {
+    const context = await contextProbes([
+      `a photograph containing ${noun}s`,
+      `a photograph containing a single ${noun}`,
+    ]);
+    return { kind: "count", noun, ...coverageFacts, context, ...common(started) };
+  }
+
+  // ---- presence: one open-vocabulary statement about a subject Jev chose
+  if (plan.reading === "presence" && plan.subject) {
+    const statement = `a photograph containing a ${plan.subject}`;
+    onStage(`detect "${statement}"`);
+    const probability = await detect(image, statement);
+
+    // Tiles are cheap once cropped: how many of them look like the subject?
+    let tilesMatchingSubject = 0;
+    if (occupied.length > 0) {
+      onStage(`checking ${occupied.length} tiles for "${plan.subject}"`);
+      const perTile = await detectBatch(occupied, statement);
+      tilesMatchingSubject = perTile.filter((p) => p !== null).length;
+    }
+
+    const context = await contextProbes([
+      `a photograph containing ${noun}s`,
+      "an unclear, cluttered or ambiguous photograph",
+    ]);
+    return {
+      kind: "presence",
+      subject: plan.subject,
+      statement,
+      probability,
+      tilesMatchingSubject,
+      tilesChecked: occupied.length,
+      ...coverageFacts,
+      context,
+      ...common(started),
+    };
+  }
+
+  // ---- identify: name the kinds, tile by tile
+  const vocab = VOCABULARIES[plan.vocabulary];
   const counts = new Map<string, { count: number; total: number }>();
   let unknownTiles = 0;
 
@@ -251,22 +339,17 @@ export async function probe(
     }
   }
 
-  let wholeImage: FactSheet["wholeImage"] = null;
+  let wholeImage: { label: string; confidence: number } | null = null;
   if (counts.size === 0) {
     onStage("no tile held the subject — reading the whole image");
     const overall = await choose(image, vocab.labels, vocab.hypothesis);
     wholeImage = overall.unknown ? null : { label: overall.label, confidence: overall.confidence };
   }
 
-  onStage("context probes");
-  const contextStatements = [
+  const context = await contextProbes([
     `a photograph containing ${noun}s`,
     `several different kinds of ${noun} together`,
-  ];
-  const contextValues = await Promise.all(contextStatements.map((s) => detect(image, s)));
-  const context = Object.fromEntries(
-    contextStatements.map((s, i) => [s, contextValues[i]]),
-  ) as Record<string, number | null>;
+  ]);
 
   const tallies = [...counts.entries()]
     .map(([label, v]) => ({
@@ -276,21 +359,22 @@ export async function probe(
       weight: v.total,
     }))
     .sort((a, b) => b.weight - a.weight);
-
   const totalWeight = tallies.reduce((a, t) => a + t.weight, 0);
 
+  if (!IDENTIFYING.has(plan.reading)) {
+    // A reading that wanted something else but arrived without what it needed
+    // (no subject, no scale) still gets the identify facts rather than nothing.
+    onStage(`reading "${plan.reading}" fell back to naming kinds`);
+  }
+
   return {
-    grid: { cols: GRID_COLS, rows: GRID_ROWS },
-    tilesExamined: grid.length,
-    tilesWithSubject: mode,
-    tilesLow: low,
-    tilesHigh: high,
+    kind: "identify",
     tallies,
     unknownTiles,
     wholeImage,
-    context,
     dominantShare: totalWeight > 0 ? tallies[0].weight / totalWeight : null,
-    imageSize: { width: image.width, height: image.height },
-    elapsedMs: Math.round(performance.now() - started),
+    ...coverageFacts,
+    context,
+    ...common(started),
   };
 }

@@ -2,6 +2,8 @@
   "name": "jeveye",
   "version": "0.1.0",
   "private": true,
+  "description": "Ask Jev about an image. A CNN reports what it sees with a calibrated confidence or an abstention; Jev judges what it means.",
+  "license": "MIT",
   "scripts": {
     "dev": "next dev",
     "build": "next build",

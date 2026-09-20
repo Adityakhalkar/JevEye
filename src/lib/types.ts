@@ -85,14 +85,25 @@ export type PresenceFacts = Observed &
   Coverage & {
     kind: "presence";
     subject: string;
-    /** The sentence CLIP actually scored. */
-    statement: string;
-    /** Whole-image presence probability, or null when the detector abstained. */
-    probability: number | null;
-    /** Tiles that also matched the statement, out of those actually checked. */
+    /**
+     * Probability of the subject when every label in the vocabulary competes.
+     *
+     * Not a yes/no score against filler sentences: CLIP puts any concrete
+     * sentence far above abstract ones, so "is there an airplane" beat
+     * "something else entirely" on a photograph of a dog. Real alternatives are
+     * what make an absence measurable.
+     */
+    subjectProbability: number;
+    /** Where the subject placed among the vocabulary, 1 = most likely. */
+    subjectRank: number;
+    /** What the classifier actually thinks is in the picture. */
+    topLabels: Array<{ label: string; p: number }>;
+    /** Tiles whose best label was the subject, out of those actually checked. */
     tilesMatchingSubject: number;
-    /** Only tiles that held something were checked, so this is the real denominator. */
     tilesChecked: number;
+    classifier: "probe" | "zero-shot";
+    /** How sure Jev was that this subject is what the question asked about. */
+    subjectConfidence: number | null;
   };
 
 export type CountFacts = Observed & Coverage & { kind: "count"; noun: string };

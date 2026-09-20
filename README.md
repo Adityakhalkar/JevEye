@@ -107,6 +107,7 @@ Stated plainly, because the whole point is honest uncertainty.
 - **The grid is coarse.** A flower straddling two tiles is seen twice; one much smaller than a tile is diluted by its background.
 - **`compare` is not implemented.** Two-image questions ("is this the same plant?") are designed but not built.
 - **Rating uses five shipped scales** — health, sharpness, crowding, damage, lighting. Ask along a scale that isn't there and it falls back to naming, because Jev cannot write a new scale.
+- **`detect` is weak at proving an absence.** CLIP scores any concrete sentence far above a vague one, so a statement contrasted only against "something else entirely" wins on almost any photograph. It now competes against an explicit negation, which helps but does not cure it. Presence questions therefore go through the vocabulary instead, where 80 real alternatives compete — and an absence shows up as the subject placing 13th behind a dog.
 - **Out-of-vocabulary is the real hazard.** Show it a protea and CLIP will reach for the nearest of its 102 labels. The margin-and-chance abstention rule is what keeps that from becoming a confident lie, and it is exactly the part that fitting would make trustworthy.
 - **Domain drift.** The label sets and thresholds suit web-like photographs. Satellite, medical, document and screenshot images will be wrong in ways the confidences will not warn you about.
 

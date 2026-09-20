@@ -205,13 +205,21 @@ function probeProbabilities(embed: Float32Array, probe: Probe): number[] {
 
 // ---------------------------------------------------------------- primitives
 
-/** Probability the statement holds of each image, or null where unreliable. */
+/**
+ * Probability the statement holds of each image, or null where unreliable.
+ *
+ * The contrast includes an explicit negation of the statement, because CLIP
+ * scores any concrete sentence far above vague ones: given only "something else
+ * entirely" to compete with, a made-up subject wins on any photograph. Even so
+ * this remains the weakest primitive for proving an absence — presence questions
+ * go through the vocabulary instead, where real alternatives compete.
+ */
 export async function detectBatch(
   images: RawImage[],
   statement: string,
 ): Promise<Array<number | null>> {
   if (images.length === 0) return [];
-  const contrast = [statement, "something else entirely", "an unclear or blank image"];
+  const contrast = [statement, negate(statement), "an unclear or blank image"];
   const scored = await scoreAgainst(images, contrast);
   return scored.map((probs) => {
     const tempered = applyTemperature(probs, CALIBRATION.primitives.detect.temperature);
@@ -221,6 +229,17 @@ export async function detectBatch(
 
 export async function detect(image: RawImage, statement: string): Promise<number | null> {
   return (await detectBatch([image], statement))[0];
+}
+
+/** A plausible competitor for a statement, so the softmax is a real contest. */
+function negate(statement: string): string {
+  const stripped = statement.replace(/^an?\s+/i, "");
+  return `a photograph that does not show ${stripped}`;
+}
+
+/** "a dog", but "an airplane". */
+export function article(word: string): string {
+  return /^[aeiou]/i.test(word) ? `an ${word}` : `a ${word}`;
 }
 
 export type Choice = {
@@ -420,30 +439,35 @@ export async function probe(
     return { kind: "count", noun, ...coverageFacts, context, ...common() };
   }
 
-  // ---- presence: one open-vocabulary statement about a subject Jev chose
+  // ---- presence: let the whole vocabulary compete for the picture
   if (plan.reading === "presence" && plan.subject) {
-    const statement = `a photograph containing a ${plan.subject}`;
-    onStage(`detect "${statement}"`);
-    const probability = await detect(image, statement);
+    const vocab = VOCABULARIES[plan.vocabulary];
+    onStage(`weigh "${plan.subject}" against ${vocab.labels.length} ${vocab.id} labels`);
+    const whole = await choose(image, vocab);
+    const rankIndex = whole.probabilities.findIndex((x) => x.label === plan.subject);
+    const subjectProbability = rankIndex >= 0 ? whole.probabilities[rankIndex].p : 0;
 
     let tilesMatchingSubject = 0;
     if (occupied.length > 0) {
       onStage(`checking ${occupied.length} tiles for "${plan.subject}"`);
-      const perTile = await detectBatch(occupied, statement);
-      tilesMatchingSubject = perTile.filter((p) => p !== null).length;
+      const perTile = await chooseBatch(occupied, vocab);
+      tilesMatchingSubject = perTile.filter((c) => !c.unknown && c.label === plan.subject).length;
     }
 
     const context = await contextProbes([
-      `a photograph containing ${noun}s`,
+      `a photograph containing ${article(plan.subject)}`,
       "an unclear, cluttered or ambiguous photograph",
     ]);
     return {
       kind: "presence",
       subject: plan.subject,
-      statement,
-      probability,
+      subjectProbability,
+      subjectRank: rankIndex >= 0 ? rankIndex + 1 : vocab.labels.length,
+      topLabels: whole.probabilities.slice(0, 4),
       tilesMatchingSubject,
       tilesChecked: occupied.length,
+      classifier: whole.source,
+      subjectConfidence: plan.subjectConfidence,
       ...coverageFacts,
       context,
       ...common(),

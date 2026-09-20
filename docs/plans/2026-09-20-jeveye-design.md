@@ -186,10 +186,48 @@ white flowers are now named *oxeye daisy* — the nearest species in the vocabul
 to the scentless mayweed actually present — so Jev's mixed-picture probability
 rises from 0.71 to 0.89. The second species finally reaches the evidence.
 
+## Follow-up: presence was measuring nothing
+
+A dog photograph, asked "Can this fly?", answered **"yes — airplane"** at 0.72
+with support 0.84. Worth recording in full, because the design claims to make
+exactly this impossible.
+
+Three failures compounded:
+
+**The contrast set was not a contest.** `detect` scored the statement against
+"something else entirely" and "an unclear or blank image" — abstract sentences
+that match no photograph well. CLIP puts any concrete sentence far above vague
+ones, so the statement won regardless of content. Measured on the dog: p(contains
+an airplane) = **0.799**. Adding an explicit negation brought it to 0.573, still
+above the abstention floor. The primitive was not weak, it was meaningless.
+
+**Non-abstention was counted as agreement.** Tile matches were
+`perTile.filter((p) => p !== null).length` — which counts every tile that merely
+cleared the floor as a tile that *matched*. Ten of thirteen "matched" an airplane
+that was not there.
+
+**The planner never sees the image.** Jev picked `airplane` from the words "Can
+this fly?" alone, at 0.59 confidence, and nothing downstream could contradict a
+premise nothing had checked.
+
+The fix is the same idea that made flowers work: let real alternatives compete.
+Presence now scores the whole vocabulary and reads off the subject's share and
+rank, and Jev is given what the classifier actually sees as counter-evidence.
+On the same photograph, airplane takes 0.006 and places 13th while dog takes
+0.457, and the answer becomes "no — no airplane; this looks like dog" at 0.89.
+True positives are unaffected: "is there a dog" still answers yes.
+
+The lesson generalizes past this bug. A probability is only as meaningful as the
+alternatives it was computed against, and a softmax over a set containing no
+plausible competitor is arithmetic, not evidence.
+
 ## Not built
 
 - Fitted calibration for anything but flower naming: `detect`, `score`, `coverage`
   and the COCO vocabulary still ship identity temperatures.
 - `compare`, and any two-image question.
+- A planner that can see. The subject of a presence question is chosen from the
+  question's words alone, so a question whose subject lives in the picture rather
+  than the sentence is still guessed at.
 - Overlapping or multi-scale tiles.
 - Golden-file fact-sheet tests and a Playwright end-to-end test. The calibration arithmetic is unit-tested; the model path was verified by hand.

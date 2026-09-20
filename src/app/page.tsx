@@ -273,13 +273,19 @@ export default function Page() {
 
             {facts.kind === "presence" && (
               <>
-                <Row k="sentence scored" v={facts.statement} />
                 <Row
-                  k="whole image matched it"
-                  v={facts.probability === null ? "unknown — abstained" : facts.probability.toFixed(2)}
+                  k="classifier"
+                  v={facts.classifier === "probe" ? "trained probe" : "zero-shot text"}
                 />
                 <Row
-                  k="tiles also matching"
+                  k={`looking for "${facts.subject}"`}
+                  v={`${facts.subjectProbability.toFixed(3)} · rank ${facts.subjectRank}`}
+                />
+                {facts.topLabels.map((t) => (
+                  <Row key={t.label} k={`sees ${t.label}`} v={t.p.toFixed(3)} />
+                ))}
+                <Row
+                  k="tiles choosing the subject"
                   v={`${facts.tilesMatchingSubject} of ${facts.tilesChecked} checked (${facts.tilesExamined - facts.tilesChecked} held nothing)`}
                 />
               </>
@@ -349,10 +355,10 @@ function explain(facts: FactSheet, judgment: Judgment): string {
             : ` Jev puts the odds of a mixed picture at ${judgment.mixed.toFixed(2)}.`;
       return spread + mixed;
     }
-    case "presence":
-      return `The sentence "${facts.statement}" matched the whole image at ${
-        facts.probability === null ? "a level too low to report" : facts.probability.toFixed(2)
-      }, and ${facts.tilesMatchingSubject} of the ${facts.tilesChecked} tiles worth checking matched it too.`;
+    case "presence": {
+      const seen = facts.topLabels[0];
+      return `With every label competing, "${facts.subject}" took ${facts.subjectProbability.toFixed(3)} and placed ${facts.subjectRank}. The strongest label was ${seen ? `"${seen.label}" at ${seen.p.toFixed(3)}` : "none"}, and ${facts.tilesMatchingSubject} of the ${facts.tilesChecked} tiles worth checking chose the subject.`;
+    }
     case "count":
       return `Counted over tiles, not individuals: ${facts.tilesWithSubject} of ${facts.tilesExamined} hold ${facts.noun}s, between ${facts.tilesLow} and ${facts.tilesHigh} with 90% probability.`;
     case "rating":

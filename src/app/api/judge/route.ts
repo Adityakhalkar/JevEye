@@ -130,29 +130,40 @@ export async function POST(request: Request) {
           state: {
             question,
             what_the_question_asks_for: asked,
+            the_thing_being_looked_for: facts.subject,
+            how_sure_we_are_that_is_what_was_asked_about:
+              facts.subjectConfidence === null
+                ? "not recorded"
+                : facts.subjectConfidence.toFixed(2),
             observations: {
-              the_sentence_that_was_scored: facts.statement,
-              how_well_the_whole_picture_matched_it:
-                facts.probability === null
-                  ? "unknown — the detector abstained, which means it could not tell"
-                  : facts.probability.toFixed(2),
+              how_the_subject_was_weighed: `every label in the catalogue competed for the picture; "${facts.subject}" took ${facts.subjectProbability.toFixed(3)} of the probability and placed ${facts.subjectRank} of ${facts.topLabels.length > 0 ? "the catalogue" : "them"}`,
+              what_the_classifier_actually_sees: facts.topLabels.map(
+                (t) => `${t.label}: ${t.p.toFixed(3)}`,
+              ),
+              tiles_whose_best_label_was_the_subject: `${facts.tilesMatchingSubject} of the ${facts.tilesChecked} tiles worth checking`,
               how_the_picture_was_examined: coverageLine(facts),
-              tiles_that_also_matched_the_subject: `${facts.tilesMatchingSubject} of the ${facts.tilesChecked} tiles worth checking (the other ${facts.tilesExamined - facts.tilesChecked} held nothing)`,
               other_observations: contextLines(facts),
             },
-            caveat: CAVEAT,
+            caveat: `${CAVEAT} If the strongest labels are something other than the thing being looked for, that is evidence of absence, and it may also mean the question was about that other thing.`,
           },
           questions: {
-            present: noul(`Is there a ${facts.subject} in this picture?`, {
+            present: noul(`Is there ${facts.subject} in this picture?`, {
               true: "The observations show it is there.",
-              false: "The observations show it is absent, or are too weak to say it is there.",
+              false:
+                "The observations show something else instead, or are too weak to say it is there.",
             }),
             support: score("How well do these observations support a confident verdict?", SUPPORT),
           },
         });
 
+        const yes = answers.present.noul >= 0.5;
+        const seen = facts.topLabels[0]?.label;
         return NextResponse.json({
-          answer: answers.present.noul >= 0.5 ? `yes — ${facts.subject}` : `no — no ${facts.subject}`,
+          answer: yes
+            ? `yes — ${facts.subject}`
+            : seen && seen !== facts.subject
+              ? `no — no ${facts.subject}; this looks like ${seen}`
+              : `no — no ${facts.subject}`,
           confidence: Math.max(answers.present.noul, 1 - answers.present.noul),
           present: answers.present.noul,
           support: answers.support.score,

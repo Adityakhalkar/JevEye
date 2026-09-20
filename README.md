@@ -72,6 +72,17 @@ vercel deploy
 
 **First visit downloads about 40 MB** of quantized CLIP weights, cached by the browser thereafter.
 
+Nothing in the vision layer is new. CLIP is
+[OpenAI's](https://arxiv.org/abs/2103.00020) (Radford et al., 2021), used as released, via
+[Xenova's ONNX export](https://huggingface.co/Xenova/clip-vit-base-patch32) and
+[transformers.js](https://github.com/huggingface/transformers.js). The
+`"a photo of a {}"` prompt template is that paper's own zero-shot recipe.
+[Temperature scaling and ECE](https://arxiv.org/abs/1706.04599) are Guo et al., 2017;
+abstaining below a threshold is [Chow's reject option](https://doi.org/10.1109/TIT.1970.1054406), 1970.
+What is JevEye's own is the arrangement: the strict split between scoring facts and judging them,
+Jev choosing the probes before any pixel is read, the chance-relative abstention rule, and routing
+tile presences through a Poisson-binomial so counts arrive as intervals.
+
 Label sets are shipped, never generated: [Oxford Flowers-102](https://www.robots.ox.ac.uk/~vgg/data/flowers/102/) and the 80 COCO categories. Jev picks which one a question is about. Nothing in this system generates text.
 
 ## What it does not do

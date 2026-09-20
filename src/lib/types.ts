@@ -74,6 +74,11 @@ export type IdentifyFacts = Observed &
     wholeImage: { label: string; confidence: number } | null;
     /** Share of identified weight held by the leading label, 0..1. */
     dominantShare: number | null;
+    /** Whether a fitted probe named the tiles, or the zero-shot text classifier. */
+    classifier: "probe" | "zero-shot";
+    /** The probe's measured held-out accuracy and ECE, when a probe answered. */
+    classifierAccuracy: number | null;
+    classifierEce: number | null;
   };
 
 export type PresenceFacts = Observed &

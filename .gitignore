@@ -43,3 +43,6 @@ next-env.d.ts
 
 # test fixtures are committed; local model cache is not
 .playwright-mcp/
+
+# offline fitting workdirs
+*.bin.work/

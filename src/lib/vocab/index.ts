@@ -1,5 +1,5 @@
-import { COCO_80 } from "./coco80";
-import { FLOWERS_102 } from "./flowers102";
+import { COCO_80 } from "./coco80.ts";
+import { FLOWERS_102 } from "./flowers102.ts";
 
 /** A shipped label set. Labels are never generated: Jev picks the set, CLIP scores within it. */
 export type Vocabulary = {
@@ -11,6 +11,12 @@ export type Vocabulary = {
   labels: readonly string[];
   /** CLIP prompt template; the label replaces `{}`. */
   hypothesis: string;
+  /**
+   * Base path of a fitted linear probe, served from `public/`. When present the
+   * classifier uses it instead of zero-shot text scoring; when the files are
+   * missing the zero-shot path still works, so this is safe to point at nothing.
+   */
+  probe?: string;
 };
 
 export type VocabularyId = "flowers" | "objects";
@@ -23,6 +29,7 @@ export const VOCABULARIES: Record<VocabularyId, Vocabulary> = {
     instanceNoun: "flower",
     labels: FLOWERS_102,
     hypothesis: "a photo of a {}, a type of flower",
+    probe: "/probes/flowers",
   },
   objects: {
     id: "objects",

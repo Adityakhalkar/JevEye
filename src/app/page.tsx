@@ -244,6 +244,14 @@ export default function Page() {
 
             {facts.kind === "identify" && (
               <>
+                <Row
+                  k="classifier"
+                  v={
+                    facts.classifier === "probe" && facts.classifierAccuracy !== null
+                      ? `trained probe — ${(facts.classifierAccuracy * 100).toFixed(1)}% on held-out images, ECE ${facts.classifierEce?.toFixed(3)}`
+                      : "zero-shot text, uncalibrated"
+                  }
+                />
                 {facts.tallies.map((t) => (
                   <Row
                     key={t.label}
@@ -298,11 +306,19 @@ export default function Page() {
             ))}
             <Row k="image" v={`${facts.imageSize.width}×${facts.imageSize.height}`} />
             <Row k="vision time" v={`${facts.elapsedMs} ms, on this machine`} />
-            {!CALIBRATION.fitted && (
-              <p className="pt-2 text-xs text-amber-500/80">
-                Calibration is unfitted: these confidences are raw model outputs and are probably
-                too high.
+            {facts.kind === "identify" && facts.classifier === "probe" ? (
+              <p className="pt-2 text-xs text-neutral-500">
+                The naming above comes from a probe fitted on Oxford Flowers-102 and calibrated on
+                images it never saw. The coverage and context numbers on this page are still raw
+                model outputs, and are probably too confident.
               </p>
+            ) : (
+              !CALIBRATION.fitted && (
+                <p className="pt-2 text-xs text-amber-500/80">
+                  Calibration is unfitted: these confidences are raw model outputs and are probably
+                  too high.
+                </p>
+              )
             )}
           </div>
         </details>

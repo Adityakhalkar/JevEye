@@ -136,9 +136,60 @@ One bug the work surfaced and fixed: presence reported matching tiles out of 16 
 only the 5 occupied tiles were ever checked. A denominator that flatters the evidence
 is exactly the failure this project exists to avoid.
 
+## Follow-up: a trained probe, and calibration that is finally measured
+
+The design shipped with calibration plumbing and no fit, which made the central
+claim architectural rather than demonstrated. That is now closed for one path.
+
+A linear probe — logistic regression on CLIP's frozen 512-d embeddings, fitted on
+Flowers-102 train+val (2,040 images) — replaces zero-shot text scoring when a
+vocabulary has one. A temperature is fitted separately on 1,200 held-out images,
+and both are reported on a further 1,500 that neither ever saw.
+
+| | zero-shot | probe |
+|---|---|---|
+| accuracy | 29.1% | 92.8% |
+| ECE raw | 0.093 | 0.459 |
+| ECE calibrated | 0.041 | 0.014 |
+
+The ECE ≤ 0.05 criterion in §6 is met for flower naming. It remains unmet for
+everything else, and the README says so rather than generalizing one result.
+
+Four things learned:
+
+**Zero-shot here is 29%, not the ~66% the CLIP paper reports.** q8 quantization
+and a single prompt template instead of an 80-template ensemble account for the
+gap. Quoting a paper's number for your own build is how you end up with a
+baseline nobody can reproduce.
+
+**The raw probe was overconfident in reverse** — ECE 0.459 while 92.8% accurate,
+far too timid. A temperature below 1 sharpens it. Calibration is a two-way
+correction, not a way of making models humbler.
+
+**The baseline doubled as a correctness check.** The 102 label names were written
+from memory; had their order not matched the dataset's class indices, zero-shot
+accuracy would have sat at chance (1.0%) instead of 29%. A baseline you can
+reason about catches bugs a test would not have been written for.
+
+**Serving skew was avoided by construction.** `tools/embed.mjs` loads the same
+checkpoint at the same quantization the browser does, so the probe is fitted on
+the embeddings it will actually meet. Fitting on fp32 and serving q8 is a silent
+distribution shift.
+
+This also forced a refactor worth keeping: CLIP's towers now load separately
+instead of behind a pipeline, so an image's embedding is available directly. The
+probe and the zero-shot classifier share one forward pass, and text embeddings
+are cached rather than recomputed per call.
+
+On the demo photograph the improvement is legible rather than merely numeric: the
+white flowers are now named *oxeye daisy* — the nearest species in the vocabulary
+to the scentless mayweed actually present — so Jev's mixed-picture probability
+rises from 0.71 to 0.89. The second species finally reaches the evidence.
+
 ## Not built
 
-- Fitted calibration, and the offline script that would produce it.
+- Fitted calibration for anything but flower naming: `detect`, `score`, `coverage`
+  and the COCO vocabulary still ship identity temperatures.
 - `compare`, and any two-image question.
 - Overlapping or multi-scale tiles.
 - Golden-file fact-sheet tests and a Playwright end-to-end test. The calibration arithmetic is unit-tested; the model path was verified by hand.

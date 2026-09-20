@@ -1,0 +1,17 @@
+{
+  "zero_shot": {
+    "accuracy": 0.29133333333333333,
+    "ece_raw": 0.09336685184141,
+    "temperature": 0.7450286384808329,
+    "ece_calibrated": 0.0407997484554847
+  },
+  "probe": {
+    "accuracy": 0.928,
+    "ece_raw": 0.45929388484358785,
+    "train_images": 2040,
+    "temperature": 0.3471004579066529,
+    "ece_calibrated": 0.014466387867927578
+  },
+  "test_images": 1500,
+  "calibration_images": 1200
+}

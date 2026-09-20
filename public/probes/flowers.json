@@ -1,0 +1,9 @@
+{
+  "classes": 102,
+  "dim": 512,
+  "temperature": 0.3471004579066529,
+  "accuracy": 0.928,
+  "ece": 0.014466387867927578,
+  "trained_on": "Oxford Flowers-102 train+val, CLIP ViT-B/32 q8 embeddings",
+  "zero_shot_baseline": 0.29133333333333333
+}

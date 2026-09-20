@@ -83,7 +83,7 @@ Each reading produces a differently shaped fact sheet, and each gets its own que
 
 **The image never leaves the browser.** Only the fact sheet — a few hundred bytes of JSON — crosses the network. The API key is the reason a server exists at all.
 
-**First visit downloads about 40 MB** of quantized CLIP weights, cached by the browser thereafter.
+**First visit downloads about 145 MB** of q8 CLIP weights — the vision tower (84 MB) and the text tower (61 MB) — cached by the browser thereafter. The two towers load separately rather than through a pipeline, so an image's 512-d embedding is available directly: that is what lets a trained probe and the zero-shot classifier share one forward pass, and it lets text embeddings be cached instead of recomputed every call.
 
 Nothing in the vision layer is new. CLIP is
 [OpenAI's](https://arxiv.org/abs/2103.00020) (Radford et al., 2021), used as released, via
@@ -102,7 +102,7 @@ Label sets **and rating scales** are shipped, never generated — Jev picks whic
 
 Stated plainly, because the whole point is honest uncertainty.
 
-- **Calibration is unfitted.** `src/lib/calibration.ts` ships identity temperatures, so the confidences are raw model outputs and are very likely overconfident. `detect` in particular returns 1.00 far too readily. Fitting needs a labelled held-out split and an offline run that has not happened. Until then the abstention thresholds are hand-set, and the 12× chance bar for `choose` was picked by eye against one photograph — which is not validation.
+- **Only flower naming is calibrated.** The probe below is fitted and measured; everything else — `detect`, `score`, `coverage`, and naming in any vocabulary without a probe — still ships identity temperatures, so those confidences are raw model outputs and are very likely too high. `detect` in particular returns 1.00 far too readily. The 12× chance abstention bar was picked by eye against one photograph, which is not validation.
 - **It counts coverage, not instances.** The original design used OWL-ViT for `locate` and `count`. Its `class_head` Cast node has no ONNX Runtime Web implementation at q8, q4f16 or fp16, and only the 583 MB fp32 graph could load — too much for a browser. So the picture is cut into a 4×4 grid and each tile examined separately. "14 of 16 tiles" measures how much of the image a kind covers, not how many flowers there are.
 - **The grid is coarse.** A flower straddling two tiles is seen twice; one much smaller than a tile is diluted by its background.
 - **`compare` is not implemented.** Two-image questions ("is this the same plant?") are designed but not built.
@@ -110,13 +110,46 @@ Stated plainly, because the whole point is honest uncertainty.
 - **Out-of-vocabulary is the real hazard.** Show it a protea and CLIP will reach for the nearest of its 102 labels. The margin-and-chance abstention rule is what keeps that from becoming a confident lie, and it is exactly the part that fitting would make trustworthy.
 - **Domain drift.** The label sets and thresholds suit web-like photographs. Satellite, medical, document and screenshot images will be wrong in ways the confidences will not warn you about.
 
+## The trained probe
+
+Naming flowers used to be zero-shot: score the image against 102 sentences and take the best. That is weak on fine-grained species, so there is now a linear probe — a logistic regression on CLIP's frozen 512-d embeddings, fitted on Oxford Flowers-102's own train+val split, with a temperature fitted separately on held-out images so the confidence means something.
+
+Measured on 1,500 test images that neither the probe nor the temperature ever saw:
+
+| | zero-shot | trained probe |
+|---|---|---|
+| **Accuracy** | 29.1% | **92.8%** |
+| **ECE, raw** | 0.093 | 0.459 |
+| **ECE, calibrated** | 0.041 | **0.014** |
+
+Chance is 1.0%. The full report is in [`docs/probe-report.json`](docs/probe-report.json).
+
+Three things worth saying plainly about those numbers:
+
+- **Zero-shot at 29% is well below the ~66% the CLIP paper reports** for this dataset. The gap is ours, not theirs: q8 quantization costs accuracy, and the paper ensembles 80 prompt templates where JevEye uses one. It is the honest baseline *for this build*, which is what the probe had to beat.
+- **The raw probe is badly calibrated in the opposite direction** — ECE 0.459 while being right 92.8% of the time, i.e. far too *timid*. The fitted temperature of 0.35 sharpens it. Calibration is not only about reining models in.
+- **On the demo photograph the difference is visible**, and not just as a bigger number. Zero-shot found corn poppy in 3 tiles at mean 0.32 alongside junk labels — ball moss, silverbush — and could not name 8 of 14 tiles. The probe finds corn poppy in 5 tiles at mean 1.00 and correctly names the white flowers *oxeye daisy*, the nearest species in the vocabulary to the scentless mayweed actually present. Jev's mixed-picture probability rises from 0.71 to 0.89, because for the first time the second species is actually in the evidence.
+
+Nothing about CLIP changed. The encoder is frozen; 204 KB of fitted weights sit on top, which is why this costs nothing at load time.
+
+**To refit, or to fit a probe for another vocabulary:**
+
+```bash
+python3 tools/prepare.py <workdir>          # splits: train / calibrate / test, kept disjoint
+node    tools/embed.mjs <split>.json <split>.bin   # CLIP embeddings, same q8 weights the browser loads
+node    tools/embed-text.mjs flowers text.bin      # the zero-shot baseline to beat
+python3 tools/fit.py <workdir> public/probes       # probe + temperature + the report above
+```
+
+The embedder deliberately uses the same checkpoint and quantization as the browser: a probe fitted on fp32 embeddings and served against q8 ones is a train/serve skew you cannot see and cannot debug.
+
 ## Tests
 
 ```bash
 npm test
 ```
 
-Covers the calibration arithmetic: temperature scaling, the Poisson-binomial over tile presences, the interval that widens on marginal evidence, and the chance-relative abstention rule. The model path is not unit-tested; it was verified end to end in a browser.
+Covers the calibration arithmetic: temperature scaling, the Poisson-binomial over tile presences, the interval that widens on marginal evidence, and the chance-relative abstention rule. The model path is not unit-tested; it was verified end to end in a browser. The probe's accuracy and ECE come from `tools/fit.py` on a held-out split, not from a test.
 
 ## Layout
 
@@ -125,6 +158,8 @@ src/lib/calibration.ts   temperatures, abstention rules, Poisson-binomial
 src/lib/vision.ts        the primitives and the fact sheet, browser-side
 src/lib/vocab/           shipped label sets
 src/lib/scales.ts        shipped rating scales
+public/probes/           fitted probe weights (204 KB) and its measured quality
+tools/                   offline: embed, fit the probe, fit the temperature
 src/app/api/plan/        Jev reads the question
 src/app/api/judge/       Jev judges the fact sheet
 src/app/page.tsx         drop zone, chat bar, answer, fact sheet

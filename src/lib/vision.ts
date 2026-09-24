@@ -24,6 +24,7 @@ import {
   CLIPVisionModelWithProjection,
   RawImage,
   env,
+  pipeline,
 } from "@huggingface/transformers";
 
 import {
@@ -36,12 +37,22 @@ import {
   poissonBinomial,
 } from "./calibration";
 import { SCALES } from "./scales";
-import { IDENTIFYING, type FactSheet, type Plan } from "./types";
-import { VOCABULARIES, type Vocabulary } from "./vocab";
+import { IDENTIFYING, type FactSheet, type Found, type Plan } from "./types";
+import { COCO_80, VOCABULARIES, type Vocabulary } from "./vocab";
 
 env.allowLocalModels = false;
 
 const MODEL = "Xenova/clip-vit-base-patch32";
+/**
+ * DETR with a ResNet-50 backbone: an actual convolutional detector, and the
+ * piece this project has been missing since OWL-ViT refused to load. It finds
+ * where things are, which no amount of whole-image classification can do —
+ * a dog occupying a twentieth of a field is not what the field is "a photo of".
+ *
+ * Loaded lazily and separately from CLIP, because it is another 41 MB and a
+ * question about flowers never needs it.
+ */
+const DETECTOR = "Xenova/detr-resnet-50";
 const DTYPE = "q8";
 const DIM = 512;
 /** The scale CLIP learned during training; it makes cosines usable, not honest. */
@@ -69,6 +80,12 @@ type Loaded = {
 let loading: Promise<Loaded> | null = null;
 const textCache = new Map<string, Float32Array>();
 
+type Detector = (
+  image: RawImage,
+  options?: { threshold?: number; percentage?: boolean },
+) => Promise<Array<{ label: string; score: number; box: Record<string, number> }>>;
+let detectorLoading: Promise<Detector> | null = null;
+
 function device(): "webgpu" | "wasm" {
   return typeof navigator !== "undefined" && "gpu" in navigator ? "webgpu" : "wasm";
 }
@@ -93,6 +110,73 @@ export async function warmUp(onProgress?: (p: LoadProgress) => void): Promise<Lo
   return loading;
 }
 
+/** Where things are, and what they are, from a detector rather than a guess. */
+export type Detection = {
+  label: string;
+  score: number;
+  box: { x1: number; y1: number; x2: number; y2: number };
+  /** Share of the frame this box covers, 0..1. */
+  area: number;
+};
+
+export async function loadDetector(onProgress?: (p: LoadProgress) => void): Promise<Detector> {
+  detectorLoading ??= pipeline("object-detection", DETECTOR, {
+    dtype: DTYPE,
+    device: device(),
+    progress_callback: (event: { status?: string; file?: string; progress?: number }) => {
+      if (event.status === "progress" && event.file) {
+        onProgress?.({ file: event.file, percent: Math.round(event.progress ?? 0) });
+      }
+    },
+  } as never) as unknown as Promise<Detector>;
+  return detectorLoading;
+}
+
+/**
+ * Every object the detector is willing to name, largest first.
+ *
+ * Unlike the CLIP paths this is closed to the 80 COCO categories and needs no
+ * prompt: the model was trained to localise them. Scores are its own and are
+ * not calibrated here, which is why callers still pass them to Jev as-is.
+ */
+export async function detectObjects(
+  image: RawImage,
+  threshold = 0.5,
+): Promise<Detection[]> {
+  const detect = await loadDetector();
+  const found = await detect(image, { threshold, percentage: false });
+  const frame = image.width * image.height;
+  return found
+    .map((f) => {
+      const box = {
+        x1: Math.max(0, f.box.xmin),
+        y1: Math.max(0, f.box.ymin),
+        x2: Math.min(image.width, f.box.xmax),
+        y2: Math.min(image.height, f.box.ymax),
+      };
+      return {
+        label: f.label,
+        score: f.score,
+        box,
+        area: Math.max(0, (box.x2 - box.x1) * (box.y2 - box.y1)) / frame,
+      };
+    })
+    .sort((a, b) => b.area - a.area);
+}
+
+/**
+ * How many of `label` are present, as a distribution over the detector's own
+ * per-box confidences rather than a count of boxes above some cutoff.
+ *
+ * This is the instance counting the design called for and the tile grid could
+ * only approximate: marginal detections widen the interval instead of being
+ * silently included or dropped.
+ */
+export function countDetections(detections: Detection[], label: string) {
+  const scores = detections.filter((d) => d.label === label).map((d) => d.score);
+  return { ...countSummary(poissonBinomial(scores)), scores };
+}
+
 function normalize(row: number[]): Float32Array {
   const out = new Float32Array(DIM);
   let sum = 0;
@@ -109,6 +193,28 @@ export async function embedImages(images: RawImage[]): Promise<Float32Array[]> {
   const inputs = await (processor as unknown as (i: RawImage[]) => Promise<unknown>)(images);
   const { image_embeds } = await (vision as (i: unknown) => Promise<{ image_embeds: { tolist(): number[][] } }>)(inputs);
   return image_embeds.tolist().map(normalize);
+}
+
+/**
+ * One 512-d unit vector per label, averaged over the vocabulary's templates.
+ *
+ * Averaging in embedding space is how CLIP's paper ensembles prompts: the mean
+ * of the normalised template embeddings, re-normalised. Cached per label, so
+ * the extra templates are paid for once.
+ */
+export async function embedLabels(vocab: Vocabulary): Promise<Float32Array[]> {
+  const perTemplate = await Promise.all(
+    vocab.hypotheses.map((template) =>
+      embedTexts(vocab.labels.map((label) => template.replace("{}", label))),
+    ),
+  );
+  return vocab.labels.map((_, i) => {
+    const mean = new Float32Array(DIM);
+    for (const template of perTemplate) {
+      for (let d = 0; d < DIM; d++) mean[d] += template[i][d];
+    }
+    return normalize(Array.from(mean));
+  });
 }
 
 /** One 512-d unit vector per sentence, cached because prompts repeat. */
@@ -285,7 +391,7 @@ export async function classify(embeds: Float32Array[], vocab: Vocabulary): Promi
     source = "probe";
     quality = { accuracy: probe.accuracy, ece: probe.ece };
   } else {
-    const texts = await embedTexts(vocab.labels.map((l) => vocab.hypothesis.replace("{}", l)));
+    const texts = await embedLabels(vocab);
     perImage = embeds.map((e) =>
       applyTemperature(
         softmax(texts.map((t) => dot(e, t) * CLIP_LOGIT_SCALE)),
@@ -452,18 +558,43 @@ export async function probe(
   const floor = CALIBRATION.primitives.coverage.reliabilityFloor;
   const occupied = grid.filter((_, i) => presence[i] >= floor);
 
-  // ---- count: coverage is the answer, so skip the classifier entirely
+  // ---- count: the detector counts instances; tiles only measure how much of
+  // the picture something fills, which is a different question.
   if (plan.reading === "count") {
+    const target = plan.subject ?? noun;
+    const knowable = (COCO_80 as readonly string[]).includes(target);
+    let detected: Found[] | null = null;
+    let instances: { mode: number; low: number; high: number } | null = null;
+    if (knowable) {
+      onStage(`locate "${target}" with the detector`);
+      const found = await detectObjects(image);
+      const { mode, low, high } = countDetections(found, target);
+      detected = found.map((d) => ({ label: d.label, score: d.score, area: d.area }));
+      instances = { mode, low, high };
+    }
     const context = await contextProbes([
       `a photograph containing ${noun}s`,
       `a photograph containing a single ${noun}`,
     ]);
-    return { kind: "count", noun, ...coverageFacts, context, ...common() };
+    return { kind: "count", noun, detected, instances, ...coverageFacts, context, ...common() };
   }
 
-  // ---- presence: let the whole vocabulary compete for the picture
+  // ---- presence: let the whole vocabulary compete for the picture, and ask
+  // the detector outright when the subject is one it was trained to localise.
   if (plan.reading === "presence" && plan.subject) {
     const vocab = VOCABULARIES[plan.vocabulary];
+
+    let detected: Found[] | null = null;
+    let detectorScore: number | null = null;
+    if ((COCO_80 as readonly string[]).includes(plan.subject)) {
+      onStage(`look for "${plan.subject}" with the detector`);
+      const found = await detectObjects(image);
+      detected = found.map((d) => ({ label: d.label, score: d.score, area: d.area }));
+      detectorScore =
+        found.filter((d) => d.label === plan.subject).reduce((a, d) => Math.max(a, d.score), 0) ||
+        null;
+    }
+
     onStage(`weigh "${plan.subject}" against ${vocab.labels.length} ${vocab.id} labels`);
     const whole = await choose(image, vocab);
     const rankIndex = whole.probabilities.findIndex((x) => x.label === plan.subject);
@@ -488,6 +619,8 @@ export async function probe(
       topLabels: whole.probabilities.slice(0, 4),
       tilesMatchingSubject,
       tilesChecked: occupied.length,
+      detected,
+      detectorScore,
       classifier: whole.source,
       subjectConfidence: plan.subjectConfidence,
       ...coverageFacts,
@@ -496,14 +629,33 @@ export async function probe(
     };
   }
 
-  // ---- identify: name the kinds, tile by tile
+  // ---- identify: name the kinds
   const vocab = VOCABULARIES[plan.vocabulary];
   const counts = new Map<string, { count: number; total: number }>();
   let unknownTiles = 0;
-  let source: Choice["source"] = "zero-shot";
+  let source: "detector" | Choice["source"] = "zero-shot";
   let quality: Choice["quality"] = null;
 
-  if (occupied.length > 0) {
+  /**
+   * When the catalogue is one the detector was trained on, it names the picture
+   * and the tiles are not consulted. It localises the subject instead of asking
+   * what the whole frame resembles, which is a different and much better
+   * question: on a dog in a field it returns dog at 1.00 where whole-image
+   * labels prefer "frisbee".
+   */
+  if (vocab.id === "objects") {
+    onStage("name what is here with the detector");
+    const found = await detectObjects(image);
+    for (const d of found) {
+      const entry = counts.get(d.label) ?? { count: 0, total: 0 };
+      entry.count += 1;
+      entry.total += d.score;
+      counts.set(d.label, entry);
+    }
+    if (counts.size > 0) source = "detector";
+  }
+
+  if (counts.size === 0 && occupied.length > 0) {
     onStage(`choose ×${occupied.length} over ${vocab.labels.length} ${vocab.id} labels`);
     const chosen = await chooseBatch(occupied, vocab);
     source = chosen[0]?.source ?? source;
@@ -522,7 +674,7 @@ export async function probe(
 
   let wholeImage: { label: string; confidence: number } | null = null;
   if (counts.size === 0) {
-    onStage("no tile held the subject — reading the whole image");
+    onStage("nothing located — reading the whole image");
     const overall = await choose(image, vocab);
     source = overall.source;
     quality = overall.quality;

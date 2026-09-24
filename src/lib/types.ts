@@ -74,8 +74,8 @@ export type IdentifyFacts = Observed &
     wholeImage: { label: string; confidence: number } | null;
     /** Share of identified weight held by the leading label, 0..1. */
     dominantShare: number | null;
-    /** Whether a fitted probe named the tiles, or the zero-shot text classifier. */
-    classifier: "probe" | "zero-shot";
+    /** What named the picture: a detector, a fitted probe, or zero-shot text. */
+    classifier: "detector" | "probe" | "zero-shot";
     /** The probe's measured held-out accuracy and ECE, when a probe answered. */
     classifierAccuracy: number | null;
     classifierEce: number | null;
@@ -104,9 +104,28 @@ export type PresenceFacts = Observed &
     classifier: "probe" | "zero-shot";
     /** How sure Jev was that this subject is what the question asked about. */
     subjectConfidence: number | null;
+    /** What the detector localised, when the subject is one of its categories. */
+    detected: Found[] | null;
+    /** The detector's best score for the subject itself, or null if it found none. */
+    detectorScore: number | null;
   };
 
-export type CountFacts = Observed & Coverage & { kind: "count"; noun: string };
+/** One thing the detector found, as Jev is told about it. */
+export type Found = { label: string; score: number; area: number };
+
+export type CountFacts = Observed &
+  Coverage & {
+    kind: "count";
+    noun: string;
+    /**
+     * Instances the detector localised, when the question is about a category
+     * it knows. Null when the subject is outside its 80 categories, in which
+     * case the tile coverage above is all there is.
+     */
+    detected: Found[] | null;
+    /** Most likely instance count and its 90% interval, over detector scores. */
+    instances: { mode: number; low: number; high: number } | null;
+  };
 
 export type RatingFacts = Observed & {
   kind: "rating";

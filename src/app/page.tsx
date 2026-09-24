@@ -249,11 +249,13 @@ export default function Page() {
             {facts.kind === "identify" && (
               <>
                 <Row
-                  k="classifier"
+                  k="named by"
                   v={
-                    facts.classifier === "probe" && facts.classifierAccuracy !== null
-                      ? `trained probe — ${(facts.classifierAccuracy * 100).toFixed(1)}% on held-out images, ECE ${facts.classifierEce?.toFixed(3)}`
-                      : "zero-shot text, uncalibrated"
+                    facts.classifier === "detector"
+                      ? "the detector, which localises things rather than guessing what the frame resembles"
+                      : facts.classifier === "probe" && facts.classifierAccuracy !== null
+                        ? `a trained probe — ${(facts.classifierAccuracy * 100).toFixed(1)}% on held-out images, ECE ${facts.classifierEce?.toFixed(3)}`
+                        : "zero-shot text, uncalibrated"
                   }
                 />
                 {facts.tallies.map((t) => (
@@ -282,7 +284,24 @@ export default function Page() {
                   v={facts.classifier === "probe" ? "trained probe" : "zero-shot text"}
                 />
                 <Row
-                  k={`looking for "${facts.subject}"`}
+                  k={`detector looked for "${facts.subject}"`}
+                  v={
+                    facts.detected === null
+                      ? "not consulted — outside its 80 categories"
+                      : facts.detectorScore === null
+                        ? "found none"
+                        : `found it at ${facts.detectorScore.toFixed(2)}`
+                  }
+                />
+                {facts.detected?.slice(0, 3).map((d, i) => (
+                  <Row
+                    key={`${d.label}-${i}`}
+                    k={`detector saw ${d.label}`}
+                    v={`${d.score.toFixed(2)} · ${Math.round(d.area * 100)}% of frame`}
+                  />
+                ))}
+                <Row
+                  k={`labels ranked "${facts.subject}"`}
                   v={`${facts.subjectProbability.toFixed(3)} · rank ${facts.subjectRank}`}
                 />
                 {facts.topLabels.map((t) => (
@@ -295,7 +314,25 @@ export default function Page() {
               </>
             )}
 
-            {facts.kind === "count" && <Row k="counted" v={`tiles holding ${facts.noun}s`} />}
+            {facts.kind === "count" && (
+              <>
+                <Row
+                  k="how many are there"
+                  v={
+                    facts.instances
+                      ? `${facts.instances.mode} (90% between ${facts.instances.low} and ${facts.instances.high}), counted by the detector`
+                      : `not counted — outside the detector's 80 categories, so the tiles above measure coverage instead`
+                  }
+                />
+                {facts.detected?.map((d, i) => (
+                  <Row
+                    key={`${d.label}-${i}`}
+                    k={`found ${d.label}`}
+                    v={`${d.score.toFixed(2)} · ${Math.round(d.area * 100)}% of frame`}
+                  />
+                ))}
+              </>
+            )}
 
             {facts.kind === "rating" && (
               <>
@@ -316,11 +353,13 @@ export default function Page() {
             ))}
             <Row k="image" v={`${facts.imageSize.width}×${facts.imageSize.height}`} />
             <Row k="vision time" v={`${facts.elapsedMs} ms, on this machine`} />
-            {facts.kind === "identify" && facts.classifier === "probe" ? (
+            {facts.kind === "identify" && facts.classifier !== "zero-shot" ? (
               <p className="pt-2 text-xs text-neutral-500">
-                The naming above comes from a probe fitted on Oxford Flowers-102 and calibrated on
-                images it never saw. The coverage and context numbers on this page are still raw
-                model outputs, and are probably too confident.
+                {facts.kind === "identify" && facts.classifier === "detector"
+                  ? "The naming above comes from a detector that localises objects, not from a guess about the whole frame. Its scores are its own and are not calibrated here."
+                  : "The naming above comes from a probe fitted on Oxford Flowers-102 and calibrated on images it never saw."}{" "}
+                The coverage and context numbers on this page are still raw model outputs, and are
+                probably too confident.
               </p>
             ) : (
               !CALIBRATION.fitted && (
@@ -361,10 +400,18 @@ function explain(facts: FactSheet, judgment: Judgment): string {
     }
     case "presence": {
       const seen = facts.topLabels[0];
-      return `With every label competing, "${facts.subject}" took ${facts.subjectProbability.toFixed(3)} and placed ${facts.subjectRank}. The strongest label was ${seen ? `"${seen.label}" at ${seen.p.toFixed(3)}` : "none"}, and ${facts.tilesMatchingSubject} of the ${facts.tilesChecked} tiles worth checking chose the subject.`;
+      const detector =
+        facts.detected === null
+          ? `The detector does not know "${facts.subject}", so this rests on the labels alone.`
+          : facts.detectorScore !== null
+            ? `The detector found ${facts.subject} at ${facts.detectorScore.toFixed(2)}.`
+            : `The detector searched for ${facts.subject} and localised none.`;
+      return `${detector} With every label competing, "${facts.subject}" took ${facts.subjectProbability.toFixed(3)} and placed ${facts.subjectRank}; the strongest was ${seen ? `"${seen.label}" at ${seen.p.toFixed(3)}` : "none"}.`;
     }
     case "count":
-      return `Counted over tiles, not individuals: ${facts.tilesWithSubject} of ${facts.tilesExamined} hold ${facts.noun}s, between ${facts.tilesLow} and ${facts.tilesHigh} with 90% probability.`;
+      return facts.instances
+        ? `The detector localised them one by one: most likely ${facts.instances.mode}, between ${facts.instances.low} and ${facts.instances.high} with 90% probability.`
+        : `The detector does not know this category, so this counts tiles rather than individuals: ${facts.tilesWithSubject} of ${facts.tilesExamined} hold ${facts.noun}s.`;
     case "rating":
       return `Read along the "${facts.scale}" scale, the picture landed at ${facts.position.toFixed(2)} of 1.00, ${
         facts.confidence === null

@@ -11,7 +11,7 @@
 
 Two layers, strict boundary:
 
-- **The vision layer** answers only questions of fact. Is this a flower; which of these 102 species; how much of the picture holds one. Every answer carries a probability, or abstains. It never judges.
+- **The vision layer** answers only questions of fact. What is here and where; is this a flower; which of these 102 species; how much of the picture holds one. Every answer carries a probability, or abstains. It never judges.
 - **Jev** judges. It reads the facts as text, with every confidence still attached — `corn poppy: 3 tiles, mean 0.32, weight 0.96` — and draws the conclusion. It never sees pixels.
 
 The loop closes because Jev decides *what to look for*. Before a single pixel is touched it reads your question into one of six **readings**, and the reading chooses which probes run:
@@ -95,9 +95,9 @@ Forty seconds of the sample clip cost **$0.000235** across 7 judgments. A still 
 
 Known limits, on top of everything below:
 
-- **One vocabulary, chosen for you, and it is the binding limit.** A still-image question lets Jev pick the label set; a camera has no question, so live always uses COCO-80. On the sample clip — a dog agility run, with a dog and a handler plainly in shot — it reports "frisbee" and "chair" and cannot name anything at all in 17 of 30 samples. The gate, the window and the judgments all work on that footage; the naming does not.
+- **Live names things with the detector, so it is bound to COCO's 80 categories.** A still-image question lets Jev pick the label set; a camera has no question. Point it at flowers and the detector finds nothing and CLIP takes over, at which point it reaches for "vase". Letting the "watching for" text pick the vocabulary is the fix worth making.
 
-  Sampling the frame's quarters as well and keeping the most confident of the five was tried and reverted. It cut unnameable samples to 1 in 19 and made the naming worse: "sports ball" at 0.53 on the same course. Picking the best of five inflates confidence by selection alone, so it bought fabricated certainty in exchange for an honest abstention. Letting the "watching for" text pick the vocabulary is the fix worth making.
+  Two earlier attempts are worth recording. Whole-frame classification reported "frisbee" and "chair" on a dog agility run and could not name 17 of 30 samples. Sampling the frame's quarters and keeping the most confident of the five cut that to 1 in 19 and made the naming *worse* — "sports ball" at 0.53 — because picking the best of five inflates confidence by selection alone. Neither was a vocabulary problem or a sampling problem: the missing piece was localisation, which is what the detector supplies.
 - **Whole frames only.** No tiling, so there is no coverage or spatial detail per frame; the grid would cost 16 embeddings per sample.
 - **No model of action.** CLIP reads single frames. "Rising confidence" approximates approach; falling over, reaching, handing something across would need a temporal encoder.
 - **It cannot do reflexes.** At ~1.1 s, nothing that needs a sub-second response should route through Jev. This is the slow, interpretive loop.
@@ -122,7 +122,8 @@ vercel deploy
 
 | Layer | Where | What |
 |---|---|---|
-| CLIP ViT-B/32, q8 ONNX | the browser, via transformers.js on WebGPU (WASM fallback) | `detect`, `choose`, `score`, `coverage` |
+| DETR with a ResNet-50 backbone, q8 ONNX (41 MB) | the browser, loaded on demand | `detectObjects` — what is here, and where |
+| CLIP ViT-B/32, q8 ONNX (145 MB) | the browser, via transformers.js on WebGPU (WASM fallback) | `detect`, `choose`, `score`, `coverage` |
 | Jev, via `@typesafe-ai/sdk` | `/api/plan`, `/api/judge` | picks the reading, label set, subject and scale; judges the fact sheet |
 
 Each reading produces a differently shaped fact sheet, and each gets its own question of Jev — naming is a `choice`, presence is a `noul`, rating is a `score`. The one constant is that Jev is always told how thin the evidence was, which is why a "no" can come back at 0.66 with support 0.30.
@@ -130,6 +131,8 @@ Each reading produces a differently shaped fact sheet, and each gets its own que
 **The image never leaves the browser.** Only the fact sheet — a few hundred bytes of JSON — crosses the network. The API key is the reason a server exists at all.
 
 **First visit downloads about 145 MB** of q8 CLIP weights — the vision tower (84 MB) and the text tower (61 MB) — cached by the browser thereafter. The two towers load separately rather than through a pipeline, so an image's 512-d embedding is available directly: that is what lets a trained probe and the zero-shot classifier share one forward pass, and it lets text embeddings be cached instead of recomputed every call.
+
+Zero-shot label scoring now ensembles six prompt templates rather than using one, which is the CLIP paper's own recipe: any single phrasing is as much a quirk of wording as a description. The embeddings are averaged once and cached, so the extra templates cost nothing after warm-up. The probe path is unaffected — it reads embeddings directly.
 
 Nothing in the vision layer is new. CLIP is
 [OpenAI's](https://arxiv.org/abs/2103.00020) (Radford et al., 2021), used as released, via
@@ -149,13 +152,32 @@ Label sets **and rating scales** are shipped, never generated — Jev picks whic
 Stated plainly, because the whole point is honest uncertainty.
 
 - **Only flower naming is calibrated.** The probe below is fitted and measured; everything else — `detect`, `score`, `coverage`, and naming in any vocabulary without a probe — still ships identity temperatures, so those confidences are raw model outputs and are very likely too high. `detect` in particular returns 1.00 far too readily. The 12× chance abstention bar was picked by eye against one photograph, which is not validation.
-- **It counts coverage, not instances.** The original design used OWL-ViT for `locate` and `count`. Its `class_head` Cast node has no ONNX Runtime Web implementation at q8, q4f16 or fp16, and only the 583 MB fp32 graph could load — too much for a browser. So the picture is cut into a 4×4 grid and each tile examined separately. "14 of 16 tiles" measures how much of the image a kind covers, not how many flowers there are.
+- **Counting only works for the detector's 80 categories.** Ask how many dogs and it localises them and reports a count with an interval. Ask how many flowers and it falls back to tile coverage, which measures how much of the picture they fill rather than how many there are — the answer says so.
+- **Detection costs a second.** DETR is accurate and slow; a still question that consults it takes several seconds in WASM, and the live view runs it on every fourth frame for that reason.
 - **The grid is coarse.** A flower straddling two tiles is seen twice; one much smaller than a tile is diluted by its background.
 - **`compare` is not implemented.** Two-image questions ("is this the same plant?") are designed but not built.
 - **Rating uses five shipped scales** — health, sharpness, crowding, damage, lighting. Ask along a scale that isn't there and it falls back to naming, because Jev cannot write a new scale.
 - **`detect` is weak at proving an absence.** CLIP scores any concrete sentence far above a vague one, so a statement contrasted only against "something else entirely" wins on almost any photograph. It now competes against an explicit negation, which helps but does not cure it. Presence questions therefore go through the vocabulary instead, where 80 real alternatives compete — and an absence shows up as the subject placing 13th behind a dog.
 - **Out-of-vocabulary is the real hazard.** Show it a protea and CLIP will reach for the nearest of its 102 labels. The margin-and-chance abstention rule is what keeps that from becoming a confident lie, and it is exactly the part that fitting would make trustworthy.
 - **Domain drift.** The label sets and thresholds suit web-like photographs. Satellite, medical, document and screenshot images will be wrong in ways the confidences will not warn you about.
+
+## The detector
+
+For a long time this project had no way to answer *where*, because OWL-ViT would not load in the browser at any usable quantization. Everything was whole-image classification, and that breaks in a specific, predictable way: a dog occupying a twentieth of a field is not what the field is "a photo of". Asked what a photograph of a dog showed, CLIP's whole-image ranking put **frisbee at 0.471** ahead of **dog at 0.349**.
+
+DETR with a ResNet-50 backbone does load, and it is an actual convolutional detector — which makes the line at the top of this page literally true for the first time, since CLIP's ViT is a transformer. On the same photograph it returns **dog at 1.00, covering 47% of the frame**, and localises no airplane at all.
+
+It changes three answers:
+
+| | before | after |
+|---|---|---|
+| "what is this?" on a dog | *frisbee* | **dog, 0.86** |
+| "can this fly?" on a dog | no — 0.66, support 0.30 | **no — 0.94, support 1.61** |
+| live on a dog agility run | *frisbee 37%*, *chair 7%*, 17 of 30 frames unnameable | **dog 67%, person 33%**, none unnameable |
+
+Counting is real again, too. `count` asks the detector for instances and runs the Poisson-binomial over its per-box confidences, so "how many dogs" returns a number and an interval rather than a count of tiles. When the subject is outside its 80 categories the tile coverage is still reported — and the answer says which of the two it is, because they are different claims.
+
+In the live view the detector runs every fourth sample rather than every one: embedding a frame costs ~15 ms and detection closer to a second, so drift is measured continuously while naming reuses its last answer in between. What is in shot changes far more slowly than the view does.
 
 ## The trained probe
 

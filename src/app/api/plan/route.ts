@@ -70,13 +70,16 @@ export async function POST(request: Request) {
     let tokens = usage.input_tokens;
 
     /**
-     * Checking for one particular thing needs to know which thing. Jev picks it
-     * from the vocabulary — a second call, because the label set to choose from
-     * is only known once the first call has settled the vocabulary.
+     * Checking for one particular thing, or counting them, needs to know which
+     * thing. Jev picks it from the vocabulary — a second call, because the label
+     * set to choose from is only known once the first call has settled the
+     * vocabulary. Counting needs it as much as presence does: without a subject
+     * the detector has nothing to look for and the answer falls back to how much
+     * of the picture is covered, which is a different question.
      */
     let subject: string | null = null;
     let subjectConfidence: number | null = null;
-    if (reading === "presence") {
+    if (reading === "presence" || reading === "count") {
       const labels = VOCABULARIES[vocabulary].labels;
       const picked = await jev().systemOne({
         state: { question },

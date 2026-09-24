@@ -9,8 +9,15 @@ export type Vocabulary = {
   /** The noun used as the open-vocabulary detection prompt. */
   instanceNoun: string;
   labels: readonly string[];
-  /** CLIP prompt template; the label replaces `{}`. */
-  hypothesis: string;
+  /**
+   * CLIP prompt templates; the label replaces `{}`.
+   *
+   * Several rather than one: CLIP's own paper ensembles eighty and reports
+   * several points of accuracy for it, because any single phrasing is a quirk
+   * of wording as much as a description. The embeddings are averaged once and
+   * cached, so a longer list costs nothing after warm-up.
+   */
+  hypotheses: readonly string[];
   /**
    * Base path of a fitted linear probe, served from `public/`. When present the
    * classifier uses it instead of zero-shot text scoring; when the files are
@@ -28,7 +35,14 @@ export const VOCABULARIES: Record<VocabularyId, Vocabulary> = {
       "Species of flower or flowering plant — 102 garden and wild species, e.g. corn poppy, oxeye daisy, sunflower, rose.",
     instanceNoun: "flower",
     labels: FLOWERS_102,
-    hypothesis: "a photo of a {}, a type of flower",
+    hypotheses: [
+      "a photo of a {}, a type of flower.",
+      "a close-up photo of a {}.",
+      "a photo of the flower {}.",
+      "a bright photo of a {}, a type of flower.",
+      "a cropped photo of a {}.",
+      "a photo of many {} together.",
+    ],
     probe: "/probes/flowers",
   },
   objects: {
@@ -37,7 +51,14 @@ export const VOCABULARIES: Record<VocabularyId, Vocabulary> = {
       "Everyday objects, animals, vehicles, food and people — 80 common categories, e.g. person, dog, car, pizza, laptop.",
     instanceNoun: "object",
     labels: COCO_80,
-    hypothesis: "a photo of a {}",
+    hypotheses: [
+      "a photo of a {}.",
+      "a photo of the {}.",
+      "a close-up photo of a {}.",
+      "a bright photo of a {}.",
+      "a cropped photo of a {}.",
+      "a photo of a {} in the real world.",
+    ],
   },
 };
 

@@ -5,7 +5,16 @@ import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { CHANGE_THRESHOLD, LiveWindow, toSample, type LiveFacts } from "@/lib/live";
-import { classify, embedImages, similarity, warmUp, type LoadProgress } from "@/lib/vision";
+import {
+  classify,
+  detectObjects,
+  embedImages,
+  loadDetector,
+  similarity,
+  warmUp,
+  type Choice,
+  type LoadProgress,
+} from "@/lib/vision";
 import { VOCABULARIES } from "@/lib/vocab";
 
 /** Sampling rate. Embedding costs ~15ms, so this leaves the tab responsive. */
@@ -13,6 +22,15 @@ const SAMPLE_MS = 300;
 const FRAME_SIZE = 336;
 /** About a minute of trace at the sampling rate. */
 const TRACE_POINTS = 190;
+/**
+ * The detector runs every Nth sample, not every one.
+ *
+ * Embedding a frame costs ~15ms and detection costs closer to a second, so they
+ * cannot share a cadence. Drift is measured on every frame because the gate
+ * depends on it; naming is slower and reuses its last answer in between, which
+ * is fine because what is in shot changes far more slowly than the view does.
+ */
+const DETECT_EVERY = 4;
 
 type Judgment = {
   situation: string;
@@ -35,6 +53,8 @@ export default function LivePage() {
   const window_ = useRef(new LiveWindow());
   const running = useRef(false);
   const inFlight = useRef(false);
+  const ticks = useRef(0);
+  const lastNaming = useRef<Choice | null>(null);
 
   const [status, setStatus] = useState<"idle" | "loading" | "running">("idle");
   const [download, setDownload] = useState<LoadProgress | null>(null);
@@ -100,8 +120,38 @@ export default function LivePage() {
      * certainty in place of an honest abstention. The wide-scene problem is
      * real, but it belongs to the vocabulary, not the sampling.
      */
-    const [embed] = await embedImages([RawImage.fromCanvas(surface)]);
-    const [named] = await classify([embed], VOCABULARIES.objects);
+    const frame = RawImage.fromCanvas(surface);
+    const [embed] = await embedImages([frame]);
+
+    /**
+     * The detector names the frame; CLIP only names it when the detector found
+     * nothing. On real footage a dog and handler in a wide shot came back
+     * "frisbee" and "chair" from whole-frame classification, because the frame
+     * genuinely is mostly grass. Localising the subject is the question worth
+     * asking.
+     */
+    let named = lastNaming.current;
+    if (ticks.current % DETECT_EVERY === 0 || !named) {
+      const found = await detectObjects(frame, 0.5);
+      if (found.length > 0) {
+        const ranked = found
+          .slice()
+          .sort((a, b) => b.score - a.score)
+          .map((d) => ({ label: d.label, p: d.score }));
+        named = {
+          label: ranked[0].label,
+          confidence: ranked[0].p,
+          unknown: false,
+          source: "zero-shot",
+          quality: null,
+          probabilities: ranked,
+        };
+      } else {
+        [named] = await classify([embed], VOCABULARIES.objects);
+      }
+      lastNaming.current = named;
+    }
+    ticks.current += 1;
 
     const now = Date.now();
     window_.current.push(toSample(now, embed, named));
@@ -163,11 +213,14 @@ export default function LivePage() {
     // A new source starts a new history; keeping the old trace would imply
     // drift between two unrelated scenes.
     window_.current = new LiveWindow();
+    ticks.current = 0;
+    lastNaming.current = null;
     setTrace([]);
     setEntries([]);
     setFacts(null);
     setNow(null);
     await warmUp(setDownload);
+    await loadDetector(setDownload);
     setDownload(null);
 
     const element = video.current;

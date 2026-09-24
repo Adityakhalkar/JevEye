@@ -136,6 +136,23 @@ export async function POST(request: Request) {
                 ? "not recorded"
                 : facts.subjectConfidence.toFixed(2),
             observations: {
+              what_the_detector_found:
+                facts.detected === null
+                  ? `not consulted — "${facts.subject}" is outside the 80 categories it can localise`
+                  : facts.detected.length === 0
+                    ? "nothing at all, anywhere in the picture"
+                    : facts.detected
+                        .map(
+                          (d) =>
+                            `${d.label} at ${d.score.toFixed(2)}, covering ${Math.round(d.area * 100)}% of the frame`,
+                        )
+                        .join("; "),
+              whether_the_detector_found_the_subject:
+                facts.detected === null
+                  ? "unknown"
+                  : facts.detectorScore === null
+                    ? `no — it localised no ${facts.subject} at all`
+                    : `yes, at ${facts.detectorScore.toFixed(2)}`,
               how_the_subject_was_weighed: `every label in the catalogue competed for the picture; "${facts.subject}" took ${facts.subjectProbability.toFixed(3)} of the probability and placed ${facts.subjectRank} of ${facts.topLabels.length > 0 ? "the catalogue" : "them"}`,
               what_the_classifier_actually_sees: facts.topLabels.map(
                 (t) => `${t.label}: ${t.p.toFixed(3)}`,
@@ -144,7 +161,7 @@ export async function POST(request: Request) {
               how_the_picture_was_examined: coverageLine(facts),
               other_observations: contextLines(facts),
             },
-            caveat: `${CAVEAT} If the strongest labels are something other than the thing being looked for, that is evidence of absence, and it may also mean the question was about that other thing.`,
+            caveat: `${CAVEAT} If the strongest labels are something other than the thing being looked for, that is evidence of absence, and it may also mean the question was about that other thing. Where the detector was consulted, trust it over the whole-picture labels: it was trained to find things and say where they are, while the labels only say what the picture most resembles.`,
           },
           questions: {
             present: noul(`Is there ${facts.subject} in this picture?`, {
@@ -157,7 +174,12 @@ export async function POST(request: Request) {
         });
 
         const yes = answers.present.noul >= 0.5;
-        const seen = facts.topLabels[0]?.label;
+        // The detector outranks the labels when it was consulted: on a dog it
+        // returns dog at 1.00 while the whole-image labels prefer "frisbee".
+        const bestDetection = facts.detected
+          ?.slice()
+          .sort((a, b) => b.score - a.score)[0];
+        const seen = bestDetection?.label ?? facts.topLabels[0]?.label;
         return NextResponse.json({
           answer: yes
             ? `yes — ${facts.subject}`
@@ -180,8 +202,19 @@ export async function POST(request: Request) {
             question,
             what_the_question_asks_for: asked,
             observations: {
-              what_was_counted: `tiles of the picture holding ${facts.noun}s`,
-              how_the_picture_was_examined: coverageLine(facts),
+              instances_the_detector_localised:
+                facts.instances === null
+                  ? "not counted — the subject is outside the 80 categories the detector knows"
+                  : `most likely ${facts.instances.mode}, and between ${facts.instances.low} and ${facts.instances.high} with 90% probability`,
+              what_the_detector_found:
+                facts.detected === null
+                  ? "not consulted"
+                  : facts.detected.length === 0
+                    ? "nothing at all"
+                    : facts.detected
+                        .map((d) => `${d.label} at ${d.score.toFixed(2)}`)
+                        .join("; "),
+              how_much_of_the_picture_is_covered: coverageLine(facts),
               other_observations: contextLines(facts),
             },
             caveat: CAVEAT,
@@ -194,8 +227,13 @@ export async function POST(request: Request) {
           },
         });
 
-        const spread =
-          facts.tilesLow === facts.tilesHigh
+        // A real instance count when the detector knows the category; otherwise
+        // say plainly that this is coverage, which is a different claim.
+        const spread = facts.instances
+          ? facts.instances.low === facts.instances.high
+            ? `${facts.instances.mode}`
+            : `${facts.instances.mode}, between ${facts.instances.low} and ${facts.instances.high}`
+          : facts.tilesLow === facts.tilesHigh
             ? `${facts.tilesWithSubject} of ${facts.tilesExamined} tiles`
             : `${facts.tilesWithSubject} of ${facts.tilesExamined} tiles, between ${facts.tilesLow} and ${facts.tilesHigh}`;
 

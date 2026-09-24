@@ -24,15 +24,33 @@ if (!vocab || !outPath) {
 const tokenizer = await AutoTokenizer.from_pretrained(MODEL);
 const text = await CLIPTextModelWithProjection.from_pretrained(MODEL, { dtype: "q8" });
 
-const prompts = vocab.labels.map((l) => vocab.hypothesis.replace("{}", l));
-const { text_embeds } = await text(await tokenizer(prompts, { padding: true, truncation: true }));
-const rows = text_embeds.tolist();
+// Ensembled exactly as the browser does it, or the baseline would be measuring
+// a classifier nobody ships.
+const unit = (row) => {
+  const norm = Math.hypot(...row) || 1;
+  return row.map((v) => v / norm);
+};
+const perTemplate = [];
+for (const template of vocab.hypotheses) {
+  const prompts = vocab.labels.map((l) => template.replace("{}", l));
+  const { text_embeds } = await text(await tokenizer(prompts, { padding: true, truncation: true }));
+  perTemplate.push(text_embeds.tolist().map(unit));
+}
+
+const rows = vocab.labels.map((_, i) => {
+  const mean = new Array(512).fill(0);
+  for (const template of perTemplate) {
+    for (let k = 0; k < 512; k++) mean[k] += template[i][k];
+  }
+  return unit(mean);
+});
 
 const out = new Float32Array(rows.length * 512);
 rows.forEach((row, i) => {
-  const norm = Math.hypot(...row);
-  for (let k = 0; k < 512; k++) out[i * 512 + k] = row[k] / norm;
+  for (let k = 0; k < 512; k++) out[i * 512 + k] = row[k];
 });
 
 writeFileSync(outPath, Buffer.from(out.buffer));
-console.error(`${rows.length} label embeddings → ${outPath}`);
+console.error(
+  `${rows.length} label embeddings from ${vocab.hypotheses.length} templates → ${outPath}`,
+);

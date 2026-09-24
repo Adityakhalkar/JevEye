@@ -76,6 +76,8 @@ export type IdentifyFacts = Observed &
     dominantShare: number | null;
     /** What named the picture: a detector, a fitted probe, or zero-shot text. */
     classifier: "detector" | "probe" | "zero-shot";
+    /** Boxes, when a detector did the naming, so the picture can be marked up. */
+    detected: Found[] | null;
     /** The probe's measured held-out accuracy and ECE, when a probe answered. */
     classifierAccuracy: number | null;
     classifierEce: number | null;
@@ -110,8 +112,14 @@ export type PresenceFacts = Observed &
     detectorScore: number | null;
   };
 
-/** One thing the detector found, as Jev is told about it. */
-export type Found = { label: string; score: number; area: number };
+/** One thing the detector found: what, how sure, and where in the frame. */
+export type Found = {
+  label: string;
+  score: number;
+  area: number;
+  /** Pixel coordinates in the prepared image, which `imageSize` describes. */
+  box: { x1: number; y1: number; x2: number; y2: number };
+};
 
 export type CountFacts = Observed &
   Coverage & {
@@ -138,6 +146,11 @@ export type RatingFacts = Observed & {
 };
 
 export type FactSheet = IdentifyFacts | PresenceFacts | CountFacts | RatingFacts;
+
+/** Boxes to draw, when the reading produced any. Rating never does. */
+export function detectionsOf(facts: FactSheet): Found[] {
+  return "detected" in facts && facts.detected ? facts.detected : [];
+}
 
 export type Judgment = {
   /** The label, the verdict, or the level name — whatever the reading asked for. */

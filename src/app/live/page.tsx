@@ -4,7 +4,9 @@ import { RawImage } from "@huggingface/transformers";
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { Boxes, Toggle } from "@/components/Boxes";
 import { CHANGE_THRESHOLD, LiveWindow, toSample, type LiveFacts } from "@/lib/live";
+import type { Found } from "@/lib/types";
 import {
   classify,
   detectObjects,
@@ -62,6 +64,10 @@ export default function LivePage() {
   const [trace, setTrace] = useState<Point[]>([]);
   /** The current frame's own label. The panel below reports the window instead. */
   const [now, setNow] = useState<{ label: string; p: number; named: boolean } | null>(null);
+  /** The detector's most recent boxes, in the sampled frame's pixels. */
+  const [found, setFound] = useState<{ boxes: Found[]; size: { width: number; height: number } } | null>(null);
+  const [showBoxes, setShowBoxes] = useState(true);
+  const [showNumbers, setShowNumbers] = useState(false);
   const [entries, setEntries] = useState<Entry[]>([]);
   const [watching, setWatching] = useState("");
   const [spend, setSpend] = useState(0);
@@ -132,9 +138,15 @@ export default function LivePage() {
      */
     let named = lastNaming.current;
     if (ticks.current % DETECT_EVERY === 0 || !named) {
-      const found = await detectObjects(frame, 0.5);
-      if (found.length > 0) {
-        const ranked = found
+      // Stricter than the still path: a moving wide shot throws up a lot of
+      // true but irrelevant background, and the overlay has to stay readable.
+      const detections = await detectObjects(frame, 0.7);
+      setFound({
+        boxes: detections.map(({ label, score, area, box }) => ({ label, score, area, box })),
+        size: { width: surface.width, height: surface.height },
+      });
+      if (detections.length > 0) {
+        const ranked = detections
           .slice()
           .sort((a, b) => b.score - a.score)
           .map((d) => ({ label: d.label, p: d.score }));
@@ -215,6 +227,7 @@ export default function LivePage() {
     window_.current = new LiveWindow();
     ticks.current = 0;
     lastNaming.current = null;
+    setFound(null);
     setTrace([]);
     setEntries([]);
     setFacts(null);
@@ -272,12 +285,13 @@ export default function LivePage() {
       <header className="mb-8 flex flex-wrap items-end justify-between gap-4">
         <div>
           <h1 className="text-[22px] font-semibold tracking-tight text-ink">JevEye Live</h1>
-          <p className="mt-1 max-w-[60ch] text-ink-2">
-            It watches continuously and asks Jev only when the view actually changes.
+          <p className="mt-1 max-w-[62ch] text-ink-2">
+            It watches every moment, but only asks for a verdict when something actually changes.
+            Nothing you point it at leaves this device.
           </p>
         </div>
         <label className="flex items-center gap-2 text-ink-3">
-          watching for
+          Watching for
           <input
             value={watching}
             onChange={(e) => setWatching(e.target.value)}
@@ -296,7 +310,12 @@ export default function LivePage() {
           }}
           className="relative overflow-hidden rounded-lg border border-rule bg-panel"
         >
-          <video ref={video} playsInline muted className="block w-full" />
+          <span className="relative block">
+            <video ref={video} playsInline muted className="block w-full" />
+            {showBoxes && found && found.boxes.length > 0 && status === "running" && (
+              <Boxes found={found.boxes} size={found.size} />
+            )}
+          </span>
           <canvas ref={canvas} className="hidden" />
           {now && status === "running" && (
             <figcaption className="absolute bottom-0 left-0 flex items-baseline gap-2 bg-ground/80 px-3 py-1.5 text-ink-2 backdrop-blur-sm">
@@ -362,16 +381,15 @@ export default function LivePage() {
                 {latest.situation}
               </p>
               <p className="mt-2 text-ink-2">
-                Asked because {latest.reason}. Jev put it at{" "}
-                <span className="tabular-nums text-ink">{latest.confidence.toFixed(2)}</span>.
+                Asked because {latest.reason}.
               </p>
               <Attention level={latest.attention} />
             </>
           ) : (
             <p className="text-ink-3">
               {status === "running"
-                ? "Watching. The first reading takes a few seconds."
-                : "Start the feed and the first reading appears here."}
+                ? "Watching. The first verdict takes a few seconds."
+                : "Start the video and the first verdict appears here."}
             </p>
           )}
         </div>
@@ -379,7 +397,9 @@ export default function LivePage() {
         <div className="min-w-0 rounded-lg border border-rule bg-panel p-4">
           <h2 className="mb-3 flex items-baseline justify-between text-ink-2">
             Earlier
-            <span className="tabular-nums text-ink-3">${spend.toFixed(6)} so far</span>
+            <span className="tabular-nums text-ink-3">
+              {showNumbers ? `$${spend.toFixed(6)} so far` : ""}
+            </span>
           </h2>
           {entries.length <= 1 && <p className="text-ink-3">Nothing yet.</p>}
           <ol className="space-y-1.5">
@@ -441,9 +461,18 @@ export default function LivePage() {
         </p>
       )}
 
-      <footer className="mt-8 max-w-[70ch] text-ink-3">
-        Frames are embedded in this browser and never uploaded. Only the window summary — a few
-        hundred tokens of text — reaches Jev.{" "}
+      <div className="mt-6 flex flex-wrap gap-5">
+        <Toggle checked={showBoxes} onChange={setShowBoxes}>
+          Outline what it finds
+        </Toggle>
+        <Toggle checked={showNumbers} onChange={setShowNumbers}>
+          Show the numbers behind this
+        </Toggle>
+      </div>
+
+      <footer className="mt-6 max-w-[70ch] text-ink-3">
+        Video is read on this device and never uploaded. Only a short written summary of what
+        changed is sent away to be judged.{" "}
         <Link href="/" className="text-ink-2 underline underline-offset-2 hover:text-ink">
           Ask about a still image instead
         </Link>
@@ -492,9 +521,9 @@ function Trace({ points }: { points: Point[] }) {
   return (
     <section ref={box} className="mt-4 min-w-0 rounded-lg border border-rule bg-panel px-4 pb-3 pt-4">
       <h2 className="mb-1 flex flex-wrap items-baseline justify-between gap-2 text-ink-2">
-        How far the view has drifted since Jev last looked
+        How much the view has changed since the last verdict
         <span className="tabular-nums text-ink-3">
-          now {current.toFixed(3)}, asks at {CHANGE_THRESHOLD}
+          a dot marks each time it asked
         </span>
       </h2>
       <svg
@@ -528,8 +557,8 @@ function Trace({ points }: { points: Point[] }) {
       </svg>
       <p className="text-ink-3">
         {points.length < 2
-          ? "The line starts once the feed does."
-          : `${asked.length} readings here. The line drops to nothing each time Jev looks, then climbs again as the view drifts.`}
+          ? "The line starts once the video does."
+          : `The line climbs as the scene changes and falls back to nothing each time it asks — ${asked.length} verdicts so far.`}
       </p>
     </section>
   );

@@ -167,6 +167,8 @@ For a long time this project had no way to answer *where*, because OWL-ViT would
 
 DETR with a ResNet-50 backbone does load, and it is an actual convolutional detector — which makes the line at the top of this page literally true for the first time, since CLIP's ViT is a transformer. On the same photograph it returns **dog at 1.00, covering 47% of the frame**, and localises no airplane at all.
 
+Because it returns coordinates, the picture can finally be marked up honestly: boxes are drawn only where a detector put them, never on the classifier paths, which have no boxes and would be inventing them. The outlines toggle off, and so do the numbers — a visitor sees an answer in plain words first, and the measurements only if they ask.
+
 It changes three answers:
 
 | | before | after |

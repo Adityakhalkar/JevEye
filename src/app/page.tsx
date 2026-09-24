@@ -3,8 +3,9 @@
 import Link from "next/link";
 import { useCallback, useRef, useState } from "react";
 
+import { Boxes, Toggle } from "@/components/Boxes";
 import { CALIBRATION } from "@/lib/calibration";
-import type { FactSheet, Judgment, Plan } from "@/lib/types";
+import { detectionsOf, type FactSheet, type Judgment, type Plan } from "@/lib/types";
 import { probe, prepare, warmUp, type LoadProgress } from "@/lib/vision";
 import { VOCABULARIES } from "@/lib/vocab";
 
@@ -29,6 +30,8 @@ export default function Page() {
   const [facts, setFacts] = useState<FactSheet | null>(null);
   const [judgment, setJudgment] = useState<Judgment | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [showBoxes, setShowBoxes] = useState(true);
+  const [showNumbers, setShowNumbers] = useState(false);
   const input = useRef<HTMLInputElement>(null);
 
   const accept = useCallback((chosen: File | null | undefined) => {
@@ -104,11 +107,12 @@ export default function Page() {
     <main className="mx-auto flex min-h-screen max-w-3xl flex-col gap-6 px-4 py-10 font-mono text-sm">
       <header>
         <h1 className="text-lg font-semibold tracking-tight text-neutral-50">JevEye</h1>
-        <p className="mt-1 max-w-xl text-neutral-400">
-          A CNN reports what it sees, with a calibrated confidence or an abstention. Jev judges what
-          that means. The image never leaves this browser — only the fact sheet does.{" "}
-          <Link href="/live" className="underline hover:text-neutral-300">
-            live video →
+        <p className="mt-1 max-w-[62ch] text-neutral-400">
+          Drop in a picture and ask about it. One model finds and names what is there, another works
+          out what that means for your question — and both say how sure they are. Your picture stays
+          on this device.{" "}
+          <Link href="/live" className="text-neutral-300 underline underline-offset-2 hover:text-neutral-100">
+            Watch live video instead
           </Link>
         </p>
       </header>
@@ -130,19 +134,32 @@ export default function Page() {
           onChange={(e) => accept(e.target.files?.[0])}
         />
         {preview ? (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img src={preview} alt="the image being asked about" className="max-h-72 w-auto rounded" />
+          <span className="relative inline-block">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src={preview} alt="the picture being asked about" className="block max-h-72 w-auto rounded" />
+            {showBoxes && facts && detectionsOf(facts).length > 0 && (
+              <Boxes found={detectionsOf(facts)} size={facts.imageSize} />
+            )}
+          </span>
         ) : (
-          <p className="py-8 text-center text-neutral-500">drop an image here, or click to choose</p>
+          <p className="py-8 text-center text-neutral-500">
+            Drop a picture here, or click to choose one
+          </p>
         )}
       </section>
+
+      {facts && detectionsOf(facts).length > 0 && (
+        <Toggle checked={showBoxes} onChange={setShowBoxes}>
+          Outline what was found ({detectionsOf(facts).length})
+        </Toggle>
+      )}
 
       <section className="flex gap-2">
         <input
           value={question}
           onChange={(e) => setQuestion(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && !busy && ask()}
-          placeholder="ask about the image…"
+          placeholder="Ask about this picture…"
           className="flex-1 rounded border border-neutral-700 bg-neutral-900 px-3 py-2 outline-none placeholder:text-neutral-600 focus:border-neutral-500"
         />
         <button
@@ -168,8 +185,8 @@ export default function Page() {
         </div>
       )}
 
-      {plan && (
-        <Block title="jev reads the question">
+      {plan && showNumbers && (
+        <Block title="how the question was read">
           <Row k="on topic" v={plan.onTopic.toFixed(2)} />
           <Row k="reading" v={`${plan.reading} (${plan.readingConfidence.toFixed(2)})`} />
           {plan.reading === "rating" && plan.scale ? (
@@ -188,7 +205,7 @@ export default function Page() {
       )}
 
       {status === "offtopic" && (
-        <Block title="not about the image">
+        <Block title="Not about the picture">
           <p className="text-neutral-300">
             Jev puts the odds that this question is about the picture at{" "}
             {plan?.onTopic.toFixed(2)}. No probes ran and nothing was spent on judging.
@@ -197,13 +214,13 @@ export default function Page() {
       )}
 
       {download && (
-        <Block title="loading models (first visit only)">
+        <Block title="Getting ready — this happens once">
           <Row k={download.file} v={`${download.percent}%`} />
         </Block>
       )}
 
-      {stages.length > 0 && (
-        <Block title={`vision probes${facts ? ` · ${facts.elapsedMs} ms, on this machine` : ""}`}>
+      {stages.length > 0 && (busy || showNumbers) && (
+        <Block title={`looking${facts ? `, took ${(facts.elapsedMs / 1000).toFixed(1)}s on this device` : ""}`}>
           {stages.map((s, i) => (
             <div key={i} className="text-neutral-400">
               {i === stages.length - 1 && busy ? "▸ " : "  "}
@@ -214,23 +231,35 @@ export default function Page() {
       )}
 
       {judgment && facts && (
-        <Block title="answer">
+        <Block title="Answer">
           <p className="text-base text-neutral-50">
             {judgment.answer}
-            <span className="ml-2 text-sm text-neutral-500">
-              confidence {judgment.confidence.toFixed(2)}
-            </span>
+            {facts.kind !== "count" && (
+              <span className="ml-2 text-sm text-neutral-500">
+                {describeConfidence(judgment.confidence)}
+              </span>
+            )}
           </p>
           <p className="mt-2 text-neutral-300">{explain(facts, judgment)}</p>
-          <Row k="support" v={judgment.support.toFixed(2)} />
-          <Row k="cost" v={`$${judgment.usdCost.toFixed(6)} · ${judgment.inputTokens} tokens`} />
+          {showNumbers && (
+            <>
+              <Row k="how well the evidence supports it, 0 to 2" v={judgment.support.toFixed(2)} />
+              <Row k="cost of this answer" v={`$${judgment.usdCost.toFixed(6)}`} />
+            </>
+          )}
         </Block>
       )}
 
       {facts && (
-        <details className="rounded-lg border border-neutral-800 bg-neutral-900/40">
+        <Toggle checked={showNumbers} onChange={setShowNumbers}>
+          Show the numbers behind this
+        </Toggle>
+      )}
+
+      {facts && showNumbers && (
+        <details open className="rounded-lg border border-neutral-800 bg-neutral-900/40">
           <summary className="cursor-pointer px-4 py-3 text-neutral-300">
-            what I saw ({facts.kind})
+            Everything it measured
           </summary>
           <div className="space-y-1 border-t border-neutral-800 px-4 py-3">
             {facts.kind !== "rating" && (
@@ -374,7 +403,7 @@ export default function Page() {
       )}
 
       {error && (
-        <Block title="error">
+        <Block title="Something went wrong">
           <p className="text-red-400">{error}</p>
         </Block>
       )}
@@ -382,41 +411,59 @@ export default function Page() {
   );
 }
 
+/**
+ * Confidence in words as well as a number.
+ *
+ * "0.39" tells a visitor nothing about whether to believe the answer, and the
+ * number alone reads as precision the calibration does not yet earn outside the
+ * flowers probe.
+ */
+function describeConfidence(p: number): string {
+  const word = p >= 0.85 ? "very sure" : p >= 0.6 ? "fairly sure" : p >= 0.4 ? "unsure" : "guessing";
+  return `${word} · ${p.toFixed(2)}`;
+}
+
 /** One plain sentence about what the evidence was, in the reading's own terms. */
 function explain(facts: FactSheet, judgment: Judgment): string {
   switch (facts.kind) {
     case "identify": {
+      const boxes = facts.detected ?? [];
       const spread =
-        facts.tilesLow === facts.tilesHigh
-          ? `Found in ${facts.tilesWithSubject} of ${facts.tilesExamined} tiles.`
-          : `Found in most likely ${facts.tilesWithSubject} of ${facts.tilesExamined} tiles, between ${facts.tilesLow} and ${facts.tilesHigh}.`;
+        facts.classifier === "detector" && boxes.length > 0
+          ? `It picked out ${boxes.length === 1 ? "one thing" : `${boxes.length} things`}: ${boxes
+              .map((b) => `${b.label} at ${Math.round(b.score * 100)}%`)
+              .join(", ")}.`
+          : facts.tilesLow === facts.tilesHigh
+            ? `It checked the picture in ${facts.tilesExamined} patches and found this in ${facts.tilesWithSubject} of them.`
+            : `It checked the picture in ${facts.tilesExamined} patches and found this in about ${facts.tilesWithSubject} of them.`;
       const mixed =
         judgment.mixed === undefined
           ? ""
           : judgment.mixed > 0.5
-            ? ` More than one kind covers a meaningful part of the picture (${judgment.mixed.toFixed(2)}), so this is not a single-kind image.`
-            : ` Jev puts the odds of a mixed picture at ${judgment.mixed.toFixed(2)}.`;
+            ? " There is clearly more than one kind here, so a single answer does not cover it."
+            : " It reads as one kind rather than a mixture.";
       return spread + mixed;
     }
     case "presence": {
       const seen = facts.topLabels[0];
       const detector =
         facts.detected === null
-          ? `The detector does not know "${facts.subject}", so this rests on the labels alone.`
+          ? `It cannot look for "${facts.subject}" directly, so this rests on what the picture most resembles.`
           : facts.detectorScore !== null
-            ? `The detector found ${facts.subject} at ${facts.detectorScore.toFixed(2)}.`
-            : `The detector searched for ${facts.subject} and localised none.`;
-      return `${detector} With every label competing, "${facts.subject}" took ${facts.subjectProbability.toFixed(3)} and placed ${facts.subjectRank}; the strongest was ${seen ? `"${seen.label}" at ${seen.p.toFixed(3)}` : "none"}.`;
+            ? `It found ${facts.subject} at ${Math.round(facts.detectorScore * 100)}%.`
+            : `It looked for ${facts.subject} and found none anywhere in the picture.`;
+      const alternative = seen ? ` The closest match was "${seen.label}".` : "";
+      return `${detector}${alternative}`;
     }
     case "count":
       return facts.instances
-        ? `The detector localised them one by one: most likely ${facts.instances.mode}, between ${facts.instances.low} and ${facts.instances.high} with 90% probability.`
-        : `The detector does not know this category, so this counts tiles rather than individuals: ${facts.tilesWithSubject} of ${facts.tilesExamined} hold ${facts.noun}s.`;
+        ? facts.instances.low === facts.instances.high
+          ? `It picked them out one by one and is settled on ${facts.instances.mode}.`
+          : `It picked them out one by one — most likely ${facts.instances.mode}, and somewhere between ${facts.instances.low} and ${facts.instances.high}.`
+        : `It cannot pick these out individually, so this is how much of the picture they fill rather than how many there are: ${facts.tilesWithSubject} patches of ${facts.tilesExamined}.`;
     case "rating":
-      return `Read along the "${facts.scale}" scale, the picture landed at ${facts.position.toFixed(2)} of 1.00, ${
-        facts.confidence === null
-          ? "but the reading was too uncertain to report a reliability"
-          : `with reading reliability ${facts.confidence.toFixed(2)}`
+      return `Judged on ${facts.scale}, the picture sits ${Math.round(facts.position * 100)}% of the way up the scale${
+        facts.confidence === null ? ", though it was not confident about that reading" : ""
       }.`;
   }
 }
@@ -424,7 +471,7 @@ function explain(facts: FactSheet, judgment: Judgment): string {
 function Block({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <section className="rounded-lg border border-neutral-800 bg-neutral-900/40 px-4 py-3">
-      <h2 className="mb-2 text-xs uppercase tracking-widest text-neutral-500">{title}</h2>
+      <h2 className="mb-2 text-neutral-500">{title}</h2>
       {children}
     </section>
   );

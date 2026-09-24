@@ -569,7 +569,7 @@ export async function probe(
       onStage(`locate "${target}" with the detector`);
       const found = await detectObjects(image);
       const { mode, low, high } = countDetections(found, target);
-      detected = found.map((d) => ({ label: d.label, score: d.score, area: d.area }));
+      detected = found.map(({ label, score, area, box }) => ({ label, score, area, box }));
       instances = { mode, low, high };
     }
     const context = await contextProbes([
@@ -589,7 +589,7 @@ export async function probe(
     if ((COCO_80 as readonly string[]).includes(plan.subject)) {
       onStage(`look for "${plan.subject}" with the detector`);
       const found = await detectObjects(image);
-      detected = found.map((d) => ({ label: d.label, score: d.score, area: d.area }));
+      detected = found.map(({ label, score, area, box }) => ({ label, score, area, box }));
       detectorScore =
         found.filter((d) => d.label === plan.subject).reduce((a, d) => Math.max(a, d.score), 0) ||
         null;
@@ -643,9 +643,11 @@ export async function probe(
    * question: on a dog in a field it returns dog at 1.00 where whole-image
    * labels prefer "frisbee".
    */
+  let identified: Found[] | null = null;
   if (vocab.id === "objects") {
     onStage("name what is here with the detector");
     const found = await detectObjects(image);
+    identified = found.map(({ label, score, area, box }) => ({ label, score, area, box }));
     for (const d of found) {
       const entry = counts.get(d.label) ?? { count: 0, total: 0 };
       entry.count += 1;
@@ -706,6 +708,7 @@ export async function probe(
     unknownTiles,
     wholeImage,
     classifier: source,
+    detected: identified,
     classifierAccuracy: quality?.accuracy ?? null,
     classifierEce: quality?.ece ?? null,
     dominantShare: totalWeight > 0 ? tallies[0].weight / totalWeight : null,

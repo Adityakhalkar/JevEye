@@ -305,10 +305,31 @@ ONNX. The gap between it and this is four orders of magnitude of data, not
 compute — no affordable GPU budget closes it. Swapping to MobileCLIP is the way
 to get a small vision tower; training one is not.
 
-The experiment is kept rather than deleted because "we tried and measured it" is
-worth more than "we assumed it wouldn't work", and because the number tells you
-*which* lever is stuck: with agreement still far from 1.0 at 14k images, the
-limit is data volume rather than student capacity.
+### Which lever is stuck
+
+One agreement number cannot say whether the shortfall is too little data or too
+small a student, and those call for opposite spending. `tools/distil_curve.py`
+separates them by training the same student on growing fractions against a fixed
+held-out tenth:
+
+| images | agreement |
+|---|---|
+| 1,552 | 0.7606 |
+| 3,104 | 0.7862 |
+| 6,208 | 0.8055 |
+| 12,416 | 0.8195 |
+
+Each doubling buys 0.74 of the previous one — still visibly climbing, and the
+first version of this script duly reported "more images are worth buying". Sum
+the remaining series and that reading falls apart: 100k images project to 0.843,
+1.6M to 0.855, and unlimited data to **0.859**. Substituting for the teacher
+needs about 0.97.
+
+So the student is the limit, not the dataset. A million images buys 0.036 of the
+0.15 that is missing, which is why MobileCLIP needed a far stronger architecture
+as well as billions of pairs. The script now extrapolates instead of thresholding
+on the final step, because a curve can climb convincingly all the way to a
+useless ceiling.
 
 ## Evaluations
 

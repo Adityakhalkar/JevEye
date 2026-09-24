@@ -30,10 +30,11 @@ export const READINGS: Record<Reading, string> = {
   only: "Which single kind the picture is of, assuming there is only one",
   dominant: "Which kind is the most common one in the picture",
   every: "Which kinds appear in the picture at all",
-  presence: "Whether one particular kind is present or absent",
+  presence:
+    "Whether one particular thing — an object, an animal, a person — is there or not. About something countable that could be pointed at, not about a quality of the picture.",
   count: "How many of something there are, or how much of the picture it fills",
   rating:
-    "How much of some quality the picture shows, along a scale — how healthy, how blurry, how crowded, how damaged, how well lit",
+    "How much of some quality something has, along a scale — how healthy, how blurry, how crowded, how damaged, how brightly lit. Yes-or-no phrasing still belongs here when what is being asked about is a quality rather than a thing: 'is this blurry', 'was this taken in the dark', 'does this look damaged'.",
 };
 
 /** Readings that need the label set, and so run the classifier over tiles. */

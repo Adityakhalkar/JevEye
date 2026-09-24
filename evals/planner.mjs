@@ -112,8 +112,14 @@ export async function evaluatePlanner() {
     }
   }
 
-  /** Below these, something has regressed. */
-  const FLOOR = { onTopic: 0.9, reading: 0.85, vocabulary: 0.9, subject: 0.85, scale: 0.8 };
+  /**
+   * Below these, something has regressed.
+   *
+   * Every field reads 100% today, but the floors keep slack: Jev is a model,
+   * not a lookup, and a suite that fails on one borderline answer gets muted
+   * rather than fixed.
+   */
+  const FLOOR = { onTopic: 0.95, reading: 0.9, vocabulary: 0.95, subject: 0.9, scale: 0.85 };
   let failures = 0;
 
   console.log("\nHOW JEV READS QUESTIONS");

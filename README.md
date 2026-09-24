@@ -260,12 +260,12 @@ That last row is the honest limit: greedy overlap association swaps identities w
 | | |
 |---|---|
 | refused off-topic questions correctly | 24/24 |
-| chose the right reading | 19/20 |
+| chose the right reading | 20/20 |
 | chose the right catalogue | 12/12 |
 | chose the right subject | 9/9 |
-| chose the right scale | 5/6 |
+| chose the right scale | 6/6 |
 
-The two misses are the same question: *"was this taken in the dark?"* reads as `presence` rather than `rating`, because "in the dark" sounds like something to look for rather than a scale to measure along.
+It earned its keep on the first run, which scored 19/20 and 5/6: *"was this taken in the dark?"* read as `presence` rather than `rating`, because "in the dark" sounds like something to look for rather than a scale to measure along. The two readings are now described by what they ask about — a thing you could point at, against a quality something has — and yes-or-no phrasing is called out as belonging to a rating when the subject is a quality. That is a change to a sentence Jev reads, verified by re-running the suite.
 
 **The shipped probe** is checked against the accuracy and calibration it advertises, so a refit cannot quietly make the downloaded weights worse.
 

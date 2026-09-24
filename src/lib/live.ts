@@ -10,8 +10,11 @@
  * a relational engine and only the judgments to a semantic model, moved from
  * rows to time.
  *
- * The gate is free: consecutive frame embeddings are unit vectors, so their
- * cosine says how much the view moved. No motion estimation, no second model.
+ * The gate is nearly free: a downscaled grey thumbnail, differenced against the
+ * one taken when Jev last looked. It began as a cosine between CLIP embeddings,
+ * which was a truer measure of *semantic* change and cost 162 ms of main-thread
+ * time per frame to obtain — most of a sample's budget, spent to produce one
+ * number, while the video stuttered behind it.
  */
 import type { Track } from "./track.ts";
 import type { Choice } from "./vision.ts";
@@ -19,7 +22,8 @@ import type { Choice } from "./vision.ts";
 /** One look at the scene. */
 export type Sample = {
   at: number;
-  embed: Float32Array;
+  /** How far the view has drifted from what Jev last saw, 0 to 1. */
+  drift: number;
   /** Most likely labels for this frame, strongest first. */
   top: Array<{ label: string; p: number }>;
   /** Whether the classifier was willing to name anything at all. */
@@ -86,7 +90,7 @@ export const HEARTBEAT_MS = 20000;
  */
 export class LiveWindow {
   private samples: Sample[] = [];
-  private lastJudgedEmbed: Float32Array | null = null;
+  private hasJudged = false;
   private lastJudgedAt = 0;
   private lastLeader: string | null = null;
 
@@ -104,11 +108,9 @@ export class LiveWindow {
     return this.samples.at(-1) ?? null;
   }
 
-  /** Cosine distance between the newest frame and the one Jev last judged. */
-  changeSinceJudgment(similarity: (a: Float32Array, b: Float32Array) => number): number {
-    const latest = this.latest;
-    if (!latest || !this.lastJudgedEmbed) return 1;
-    return 1 - similarity(latest.embed, this.lastJudgedEmbed);
+  /** How far the newest frame has drifted from the one Jev last judged. */
+  changeSinceJudgment(): number {
+    return this.latest?.drift ?? 1;
   }
 
   /**
@@ -119,17 +121,14 @@ export class LiveWindow {
    * comes first, because none of the reasons are worth queueing behind a call
    * that has not come back yet.
    */
-  shouldJudge(
-    now: number,
-    similarity: (a: Float32Array, b: Float32Array) => number,
-  ): { judge: boolean; reason: string } {
+  shouldJudge(now: number): { judge: boolean; reason: string } {
     const latest = this.latest;
     if (!latest || this.samples.length < 3) return { judge: false, reason: "warming up" };
     // The first look is not rate-limited against a judgment that never happened.
-    if (!this.lastJudgedEmbed) return { judge: true, reason: "first look" };
+    if (!this.hasJudged) return { judge: true, reason: "first look" };
     if (now - this.lastJudgedAt < MIN_JUDGMENT_GAP_MS) return { judge: false, reason: "too soon" };
 
-    const change = this.changeSinceJudgment(similarity);
+    const change = this.changeSinceJudgment();
     if (change >= CHANGE_THRESHOLD) {
       return { judge: true, reason: `the view moved (${change.toFixed(2)})` };
     }
@@ -147,7 +146,7 @@ export class LiveWindow {
   markJudged(now: number) {
     const latest = this.latest;
     if (!latest) return;
-    this.lastJudgedEmbed = latest.embed;
+    this.hasJudged = true;
     this.lastJudgedAt = now;
     this.lastLeader = latest.top[0]?.label ?? null;
   }
@@ -159,12 +158,7 @@ export class LiveWindow {
    * presence over time, a trend across its halves, how much the view moved.
    * A per-frame detector can report none of it.
    */
-  facts(
-    now: number,
-    similarity: (a: Float32Array, b: Float32Array) => number,
-    attending: Attending[] = [],
-    scenery = 0,
-  ): LiveFacts {
+  facts(now: number, attending: Attending[] = [], scenery = 0): LiveFacts {
     const samples = this.samples;
     const span = samples.length > 1 ? (samples.at(-1)!.at - samples[0].at) / 1000 : 0;
 
@@ -211,19 +205,16 @@ export class LiveWindow {
       })
       .sort((a, b) => b.seenFraction - a.seenFraction || b.meanProbability - a.meanProbability);
 
-    let stepped = 0;
-    for (let i = 1; i < samples.length; i++) {
-      stepped += 1 - similarity(samples[i].embed, samples[i - 1].embed);
-    }
+    const stepped = samples.reduce((total, s) => total + s.drift, 0);
 
     return {
       windowSeconds: Number(span.toFixed(1)),
       samples: samples.length,
       samplesPerSecond: span > 0 ? Number((samples.length / span).toFixed(1)) : 0,
       subjects,
-      changeSinceLastJudgment: Number(this.changeSinceJudgment(similarity).toFixed(3)),
+      changeSinceLastJudgment: Number(this.changeSinceJudgment().toFixed(3)),
       changeBetweenSamples:
-        samples.length > 1 ? Number((stepped / (samples.length - 1)).toFixed(3)) : 0,
+        samples.length > 0 ? Number((stepped / samples.length).toFixed(3)) : 0,
       distinctLeaders: leaders.size,
       unnamedSamples: unnamed,
       attending,
@@ -244,10 +235,10 @@ export function attendingFrom(track: Track, now: number, heading: string): Atten
 }
 
 /** Turn a classifier result into a sample, keeping only what the window needs. */
-export function toSample(at: number, embed: Float32Array, choice: Choice): Sample {
+export function toSample(at: number, drift: number, choice: Choice): Sample {
   return {
     at,
-    embed,
+    drift,
     top: choice.probabilities.slice(0, 3),
     named: !choice.unknown,
   };

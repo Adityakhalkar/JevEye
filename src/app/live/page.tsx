@@ -6,6 +6,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { Boxes, Toggle } from "@/components/Boxes";
 import { CHANGE_THRESHOLD, LiveWindow, attendingFrom, toSample, type LiveFacts } from "@/lib/live";
+import { difference, thumbnail, type Thumb } from "@/lib/motion";
 import type { Found } from "@/lib/types";
 import { Tracker, heading, type Track } from "@/lib/track";
 import {
@@ -14,7 +15,6 @@ import {
   detectObjects,
   embedImages,
   loadDetector,
-  similarity,
   warmUp,
   type Choice,
   type LoadProgress,
@@ -69,15 +69,24 @@ const ATTENTION_LEVELS = ["nothing here", "worth noticing", "look now"];
 export default function LivePage() {
   const video = useRef<HTMLVideoElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
+  const scratch = useRef<HTMLCanvasElement>(null);
+  const lastThumb = useRef<Thumb | null>(null);
+  const detectThumb = useRef<Thumb | null>(null);
   const window_ = useRef(new LiveWindow());
   const running = useRef(false);
   const inFlight = useRef(false);
   const ticks = useRef(0);
   const lastNaming = useRef<Choice | null>(null);
+  /** True while a detection is in flight, so only one runs at a time. */
+  const detecting = useRef(false);
+  /** How long the last detection took, measured off the sampling loop. */
+  const lastDetectMs = useRef(0);
   const tracker = useRef(new Tracker());
   const lastDetectEmbed = useRef<Float32Array | null>(null);
   const [tracks, setTracks] = useState<Track[]>([]);
   const [scenery, setScenery] = useState(0);
+  /** Where a sample's time went, so slowness can be located rather than guessed at. */
+  const [cost, setCost] = useState<{ embed: number; detect: number; name: number; total: number } | null>(null);
 
   const [status, setStatus] = useState<"idle" | "loading" | "running">("idle");
   const [download, setDownload] = useState<LoadProgress | null>(null);
@@ -182,8 +191,27 @@ export default function LivePage() {
      * certainty in place of an honest abstention. The wide-scene problem is
      * real, but it belongs to the vocabulary, not the sampling.
      */
+    const began = performance.now();
+    const scratchCanvas = scratch.current;
+    if (!scratchCanvas) return;
+
+    /**
+     * The cheap signal first.
+     *
+     * Every sample used to embed the frame with CLIP — 162 ms on the main
+     * thread, to produce one number saying whether anything moved. A thumbnail
+     * difference answers that in about a millisecond, which is the difference
+     * between a video that plays and one that stutters.
+     */
+    const thumb = thumbnail(surface, scratchCanvas);
+    const moved = lastThumb.current ? difference(lastThumb.current, thumb) : 1;
+    lastThumb.current = thumb;
+    const sinceDetection = detectThumb.current ? difference(detectThumb.current, thumb) : 1;
+
     const frame = RawImage.fromCanvas(surface);
-    const [embed] = await embedImages([frame]);
+    const embedded = performance.now();
+    let nameMs = 0;
+    let embedMs = 0;
 
     /**
      * The detector names the frame; CLIP only names it when the detector found
@@ -193,56 +221,90 @@ export default function LivePage() {
      * asking.
      */
     // Skip the detector outright when the view has not moved since it last ran.
-    const settled =
-      lastDetectEmbed.current !== null &&
-      1 - similarity(embed, lastDetectEmbed.current) < REDETECT_CHANGE;
+    const settled = sinceDetection < REDETECT_CHANGE;
 
+    /**
+     * Detection is started, not awaited.
+     *
+     * It costs several times what a sample budget allows, and awaiting it here
+     * stalled the whole loop: the video stuttered, boxes stopped moving, and
+     * the page felt broken rather than busy. Started alongside, it lands when
+     * it lands — the tracker is told which frame it saw, and association
+     * already relaxes with the gap, so a late answer still finds its subject.
+     */
+    if (!detecting.current && !settled && ticks.current % DETECT_EVERY === 0) {
+      detecting.current = true;
+      const capturedAt = Date.now();
+      const capturedThumb = thumb;
+      void (async () => {
+        try {
+          const beforeDetect = performance.now();
+          const detections = await detectObjects(frame, 0.5, DETECT_EDGE_LIVE);
+          lastDetectMs.current = Math.round(performance.now() - beforeDetect);
+          detectThumb.current = capturedThumb;
+          tracker.current.setFrameArea(surface.width * surface.height);
+          tracker.current.update(
+            detections.map(({ label, score, box }) => ({ label, score, box })),
+            capturedAt,
+          );
+          const best = detections.slice().sort((a, b) => b.score - a.score)[0];
+          if (best) {
+            lastNaming.current = {
+              label: best.label,
+              confidence: best.score,
+              unknown: false,
+              source: "zero-shot",
+              quality: null,
+              probabilities: detections
+                .slice()
+                .sort((a, b) => b.score - a.score)
+                .map((d) => ({ label: d.label, p: d.score })),
+            };
+          }
+          setFound({ boxes: [], size: { width: surface.width, height: surface.height } });
+        } finally {
+          detecting.current = false;
+        }
+      })();
+    }
+
+    /**
+     * CLIP runs only when nothing else can name the frame.
+     *
+     * Once the detector has spoken it keeps answering, and a vocabulary it does
+     * not know (flowers) is the only case that still needs an embedding —
+     * so the expensive path is the exception rather than every sample.
+     */
     let named = lastNaming.current;
-    if ((ticks.current % DETECT_EVERY === 0 && !settled) || !named) {
-      // Stricter than the still path: a moving wide shot throws up a lot of
-      // true but irrelevant background, and the overlay has to stay readable.
-      // Lower than it was: a small dog in a wide shot does not clear 0.7, and
-      // the clutter a looser threshold admits is what salience is for.
-      const detections = await detectObjects(frame, 0.5, DETECT_EDGE_LIVE);
-      lastDetectEmbed.current = embed;
-      tracker.current.setFrameArea(surface.width * surface.height);
-      tracker.current.update(
-        detections.map(({ label, score, box }) => ({ label, score, box })),
-        Date.now(),
-      );
-      setFound({ boxes: [], size: { width: surface.width, height: surface.height } });
-      if (detections.length > 0) {
-        const ranked = detections
-          .slice()
-          .sort((a, b) => b.score - a.score)
-          .map((d) => ({ label: d.label, p: d.score }));
-        named = {
-          label: ranked[0].label,
-          confidence: ranked[0].p,
-          unknown: false,
-          source: "zero-shot",
-          quality: null,
-          probabilities: ranked,
-        };
-      } else {
-        [named] = await classify([embed], VOCABULARIES[vocabularyRef.current]);
-      }
+    let embed: Float32Array | null = null;
+    if (!named) {
+      const beforeName = performance.now();
+      [embed] = await embedImages([frame]);
+      embedMs = Math.round(performance.now() - beforeName);
+      [named] = await classify([embed], VOCABULARIES[vocabularyRef.current]);
+      nameMs = Math.round(performance.now() - beforeName) - embedMs;
       lastNaming.current = named;
     }
     ticks.current += 1;
+    if (!named) return;
 
     const now = Date.now();
-    window_.current.push(toSample(now, embed, named));
+    window_.current.push(toSample(now, moved, named));
     const attending = tracker.current.salient(now, ATTEND_TO);
     const setAside = tracker.current.scenery(now).length;
     const live = window_.current.facts(
       now,
-      similarity,
       attending.map((t) => attendingFrom(t, now, heading(t))),
       setAside,
     );
     setScenery(setAside);
-    const { judge: should, reason } = window_.current.shouldJudge(now, similarity);
+    setCost({
+      embed: embedMs || Math.round(embedded - began),
+      detect: lastDetectMs.current,
+      name: Math.round(nameMs),
+      total: Math.round(performance.now() - began),
+    });
+    const { judge: should, reason } = window_.current.shouldJudge(now);
 
     const best = named.probabilities[0];
     setNow(best ? { label: best.label, p: best.p, named: !named.unknown } : null);
@@ -317,6 +379,9 @@ export default function LivePage() {
     window_.current = new LiveWindow();
     ticks.current = 0;
     lastNaming.current = null;
+    detecting.current = false;
+    lastThumb.current = null;
+    detectThumb.current = null;
     tracker.current.reset();
     lastDetectEmbed.current = null;
     setTracks([]);
@@ -419,6 +484,7 @@ export default function LivePage() {
             )}
           </span>
           <canvas ref={canvas} className="hidden" />
+          <canvas ref={scratch} className="hidden" />
           {now && status === "running" && (
             <figcaption className="absolute bottom-0 left-0 flex items-baseline gap-2 bg-ground/80 px-3 py-1.5 text-ink-2 backdrop-blur-sm">
               <span className={now.named ? "text-ink" : "text-ink-3"}>
@@ -466,6 +532,12 @@ export default function LivePage() {
               </li>
             ))}
           </ul>
+          {showNumbers && cost && (
+            <p className="mt-3 text-ink-3">
+              a sample costs {cost.total} ms (embed {cost.embed}, name {cost.name}); the detector
+              takes {cost.detect} ms alongside it
+            </p>
+          )}
           {facts && facts.unnamedSamples > 0 && (
             <p className="mt-3 text-ink-3">
               Nothing nameable in {facts.unnamedSamples} of {facts.samples} samples.

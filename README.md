@@ -69,7 +69,16 @@ Why this is not just a VLM with extra steps: a VLM collapses seeing and judging 
 | Embedding one frame | ~15 ms |
 | A Jev round trip | ~1.1 s median (395–1553 ms) |
 
-Seventy times apart, so Jev cannot sit in the frame loop. Instead frames are embedded continuously and **the embeddings themselves are the gate**: consecutive frames are unit vectors, so their cosine distance says how much the view moved. No motion estimation, no second model, no threshold tuned against pixels. Jev is asked only when the view moves past 0.12, when the leading label changes, or on a 20-second heartbeat — and never more than once every 2.5 s, since a call takes 1.1.
+Seventy times apart, so Jev cannot sit in the frame loop. Instead each frame is compared against the one Jev last saw, and **that comparison is the gate**.
+
+It began as a cosine between CLIP embeddings, which measures *semantic* change and is the better signal — and cost 162 ms of main-thread time per frame to obtain. That is most of a sample's budget spent producing a single number, while the video stuttered behind it, and it is why the live view felt slow no matter what else was tuned. A downscaled grey thumbnail answers the same question in about a millisecond:
+
+| | per sample |
+|---|---|
+| CLIP embedding | 162 ms |
+| **thumbnail difference** | **1 ms** |
+
+The signal is cruder — a light switched on registers as change where an embedding would shrug — but for deciding *when to look harder*, crude and instant beats considered and late. The detector, at 741 ms, no longer runs inside the loop either: it is started alongside and lands when it lands, with the tracker told which frame it saw. Association already relaxes with the gap, so a late answer still finds its subject. Jev is asked only when the view moves past 0.12, when the leading label changes, or on a 20-second heartbeat — and never more than once every 2.5 s, since a call takes 1.1.
 
 This is the JevNQL shape moved from rows to time: a cheap deterministic filter upstream, the expensive semantic judgment only on what survives.
 

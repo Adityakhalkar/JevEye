@@ -235,6 +235,40 @@ python3 tools/fit.py <workdir> public/probes       # probe + temperature + the r
 
 The embedder deliberately uses the same checkpoint and quantization as the browser: a probe fitted on fp32 embeddings and served against q8 ones is a train/serve skew you cannot see and cannot debug.
 
+## Evaluations
+
+```bash
+npm run eval            # includes the planner, which calls Jev (~$0.0013)
+npm run eval:offline    # everything that needs no network
+```
+
+Unit tests say the code does what it was written to do. These say the system is as good as this page claims, which is a different question and the one that quietly stops being true.
+
+**Tracking** runs synthetic sequences whose ground truth is known by construction — a subject crossing the frame, one the detector loses for three passes, noisy boxes, and two of the same kind crossing paths. Real MOT benchmarks are gigabytes and licensed; these cover the failures that actually break trackers. The headline number is identity switches, because a tracker that relabels a subject halfway across the frame has failed at the one job detection cannot do.
+
+| scenario | id switches | covered | phantom boxes |
+|---|---|---|---|
+| one subject crossing the frame | 0 | 95% | 0 |
+| detector loses it for three passes | 0 | 80% | 0 |
+| noisy boxes around a steady subject | 0 | 95% | 0 |
+| **two of the same kind crossing paths** | **2** | 95% | 1 |
+
+That last row is the honest limit: greedy overlap association swaps identities when two same-label objects cross. Fixing it needs appearance features per track, not better bookkeeping.
+
+**How Jev reads questions** runs 24 fixed cases through the real planner, because it is the one component whose behaviour changes without the code changing. Where more than one reading is defensible the case accepts a set — "what kind of flower is this" is legitimately `only` or `dominant`, and scoring it as a single right answer would measure the rubric rather than the model.
+
+| | |
+|---|---|
+| refused off-topic questions correctly | 24/24 |
+| chose the right reading | 19/20 |
+| chose the right catalogue | 12/12 |
+| chose the right subject | 9/9 |
+| chose the right scale | 5/6 |
+
+The two misses are the same question: *"was this taken in the dark?"* reads as `presence` rather than `rating`, because "in the dark" sounds like something to look for rather than a scale to measure along.
+
+**The shipped probe** is checked against the accuracy and calibration it advertises, so a refit cannot quietly make the downloaded weights worse.
+
 ## Tests
 
 ```bash

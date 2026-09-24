@@ -9,7 +9,9 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "node --test --experimental-strip-types src/lib/*.test.ts"
+    "test": "node --test --experimental-strip-types src/lib/*.test.ts",
+    "eval": "node --experimental-strip-types evals/run.mjs",
+    "eval:offline": "node --experimental-strip-types evals/run.mjs --offline"
   },
   "dependencies": {
     "@huggingface/transformers": "^4.3.0",

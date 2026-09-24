@@ -58,6 +58,10 @@ Why this is not just a VLM with extra steps: a VLM collapses seeing and judging 
 
 ## JevEye Live
 
+<p align="center">
+  <img src="docs/jeveye-live.png" alt="JevEye Live: the video feed, what is in view, and a sawtooth trace of how far the view has drifted, with a marker each time Jev was asked" width="820">
+</p>
+
 `/live` watches a video feed instead of a still image. Perception and judgment run at different speeds, and the gap between them is the design:
 
 | | measured |
@@ -68,6 +72,8 @@ Why this is not just a VLM with extra steps: a VLM collapses seeing and judging 
 Seventy times apart, so Jev cannot sit in the frame loop. Instead frames are embedded continuously and **the embeddings themselves are the gate**: consecutive frames are unit vectors, so their cosine distance says how much the view moved. No motion estimation, no second model, no threshold tuned against pixels. Jev is asked only when the view moves past 0.12, when the leading label changes, or on a 20-second heartbeat — and never more than once every 2.5 s, since a call takes 1.1.
 
 This is the JevNQL shape moved from rows to time: a cheap deterministic filter upstream, the expensive semantic judgment only on what survives.
+
+The interface is built around that gate rather than around the video. Drift climbs while the view changes and drops to nothing each time Jev looks, so the trace draws a sawtooth — the mechanism itself, not an illustration of it, with a marker at every reading. No bounding boxes are drawn, because whole frames are classified and there are none to draw; the overlay names the current frame and says so.
 
 What Jev gets is a **window**, not a frame:
 

@@ -2,6 +2,19 @@
 
 @theme {
   --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace;
+
+  /* Instrument tokens for the live view. Validated against the dark surface
+     with the dataviz palette checker: the trace passes as a lone series, and
+     the two status colours separate at deutan dE 9.0. */
+  --color-ground: #0e1013;
+  --color-panel: #14181c;
+  --color-rule: #232a31;
+  --color-trace: #3e9fc2;
+  --color-watch: #a8842a;
+  --color-alarm: #be4a5c;
+  --color-ink: #e6eaed;
+  --color-ink-2: #93a0aa;
+  --color-ink-3: #5c6872;
 }
 
 html {

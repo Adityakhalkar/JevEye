@@ -13,7 +13,8 @@
  * The gate is free: consecutive frame embeddings are unit vectors, so their
  * cosine says how much the view moved. No motion estimation, no second model.
  */
-import type { Choice } from "./vision";
+import type { Track } from "./track.ts";
+import type { Choice } from "./vision.ts";
 
 /** One look at the scene. */
 export type Sample = {
@@ -37,6 +38,15 @@ export type Subject = {
   trend: "rising" | "falling" | "steady";
 };
 
+/** One thing worth watching, as Jev is told about it. */
+export type Attending = {
+  id: number;
+  label: string;
+  seconds: number;
+  heading: string;
+  covers: number;
+};
+
 export type LiveFacts = {
   windowSeconds: number;
   samples: number;
@@ -49,6 +59,15 @@ export type LiveFacts = {
   distinctLeaders: number;
   /** Samples the classifier refused to name, out of the window. */
   unnamedSamples: number;
+  /**
+   * The few things being followed, most deserving first.
+   *
+   * A wide shot contains a dozen true detections and listing them is not an
+   * understanding of it. What is moving, and how, is.
+   */
+  attending: Attending[];
+  /** How many more were seen and set aside as scenery. */
+  scenery: number;
 };
 
 const WINDOW_MS = 9000;
@@ -143,6 +162,8 @@ export class LiveWindow {
   facts(
     now: number,
     similarity: (a: Float32Array, b: Float32Array) => number,
+    attending: Attending[] = [],
+    scenery = 0,
   ): LiveFacts {
     const samples = this.samples;
     const span = samples.length > 1 ? (samples.at(-1)!.at - samples[0].at) / 1000 : 0;
@@ -205,8 +226,21 @@ export class LiveWindow {
         samples.length > 1 ? Number((stepped / (samples.length - 1)).toFixed(3)) : 0,
       distinctLeaders: leaders.size,
       unnamedSamples: unnamed,
+      attending,
+      scenery,
     };
   }
+}
+
+/** A track as Jev should hear about it: what, how long, doing what. */
+export function attendingFrom(track: Track, now: number, heading: string): Attending {
+  return {
+    id: track.id,
+    label: track.label,
+    seconds: Number(((now - track.firstSeen) / 1000).toFixed(1)),
+    heading,
+    covers: Number(track.area.toFixed(3)),
+  };
 }
 
 /** Turn a classifier result into a sample, keeping only what the window needs. */

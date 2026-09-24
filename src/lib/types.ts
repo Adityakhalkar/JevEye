@@ -1,5 +1,5 @@
-import type { ScaleId } from "./scales";
-import type { VocabularyId } from "./vocab";
+import type { ScaleId } from "./scales.ts";
+import type { VocabularyId } from "./vocab/index.ts";
 
 /** What Jev decided the question means, before any pixel is touched. */
 export type Plan = {

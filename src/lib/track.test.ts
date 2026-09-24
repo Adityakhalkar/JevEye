@@ -7,6 +7,7 @@ import {
   MIN_HITS,
   Tracker,
   centre,
+  gateFor,
   heading,
   iou,
   predictBox,
@@ -153,4 +154,119 @@ test("a growing box is described as approaching even when its centre barely move
   const [track] = t.update([seen("dog", box(98, 98, 140, 140))], 600);
   assert.match(heading(track), /coming closer/);
   assert.doesNotMatch(heading(track), /holding still, /);
+});
+
+test("a parked car becomes scenery while a crossing dog does not", () => {
+  const t = new Tracker(640 * 480);
+  // Same size, same label count, different behaviour: one still, one crossing.
+  for (let i = 0; i <= 12; i++) {
+    t.update(
+      [
+        seen("car", box(400, 300, 80, 80)),
+        seen("dog", box(20 + i * 40, 200, 80, 80)),
+      ],
+      i * 300,
+    );
+  }
+  const now = 12 * 300;
+  const salient = t.salient(now);
+  const scenery = t.scenery(now);
+  assert.equal(salient.length, 1, "only the moving thing is worth reporting");
+  assert.equal(salient[0].label, "dog");
+  assert.deepEqual(scenery.map((s) => s.label), ["car"]);
+});
+
+test("something newly arrived is attended to before it has moved", () => {
+  const t = new Tracker(640 * 480);
+  for (let i = 0; i <= 12; i++) t.update([seen("car", box(400, 300))], i * 300);
+  // A person appears late and stands still.
+  const arrival = 13 * 300;
+  t.update([seen("car", box(400, 300)), seen("person", box(100, 100))], arrival);
+  t.update([seen("car", box(400, 300)), seen("person", box(100, 100))], arrival + 300);
+  const salient = t.salient(arrival + 300);
+  assert.ok(salient.some((s) => s.label === "person"), "a new arrival is not scenery yet");
+});
+
+test("the crowded frame is cut to a handful, not reported entire", () => {
+  const t = new Tracker(640 * 480);
+  // Eight parked things and two movers, as a wide shot actually looks.
+  for (let i = 0; i <= 12; i++) {
+    const seenNow = [];
+    for (let k = 0; k < 8; k++) seenNow.push(seen("car", box(20 + k * 70, 380, 50, 50)));
+    seenNow.push(seen("dog", box(20 + i * 40, 200, 60, 60)));
+    seenNow.push(seen("person", box(600 - i * 38, 180, 60, 60)));
+    t.update(seenNow, i * 300);
+  }
+  const salient = t.salient(12 * 300);
+  assert.ok(salient.length <= 3, `reported ${salient.length}, should be a handful`);
+  assert.deepEqual(
+    salient.map((s) => s.label).sort(),
+    ["dog", "person"],
+    "the two movers, none of the eight parked",
+  );
+});
+
+test("pace is measured against the frame, not in raw pixels", () => {
+  const small = new Tracker(320 * 240);
+  const large = new Tracker(1280 * 960);
+  for (let i = 0; i <= 8; i++) {
+    // Each crosses the same *fraction* of its own frame per step.
+    small.update([seen("dog", box(i * 20, 50, 30, 30))], i * 300);
+    large.update([seen("dog", box(i * 80, 200, 120, 120))], i * 300);
+  }
+  const a = small.salient(8 * 300)[0];
+  const b = large.salient(8 * 300)[0];
+  assert.ok(a && b, "both are salient");
+  assert.ok(Math.abs(a.pace - b.pace) < 0.05, `pace ${a.pace.toFixed(3)} vs ${b.pace.toFixed(3)}`);
+});
+
+test("the overlap gate relaxes as the detector slows down", () => {
+  assert.equal(gateFor(0), IOU_GATE, "no relaxation when the looks are simultaneous");
+  assert.ok(gateFor(900) < IOU_GATE, "a slower detector demands less overlap");
+  assert.ok(gateFor(5000) >= 0.05, "but never nothing at all");
+});
+
+test("a fast subject keeps its identity even when looks are far apart", () => {
+  const t = new Tracker(640 * 480);
+  // 900ms between passes, moving far enough that the boxes barely overlap.
+  t.update([seen("dog", box(0, 200))], 0);
+  const first = t.update([seen("dog", box(85, 200))], 900)[0];
+  const later = t.update([seen("dog", box(170, 200))], 1800)[0];
+  assert.ok(first && later, "the track survives both gaps");
+  assert.equal(later.id, first.id, "and keeps one identity across them");
+});
+
+test("a panning camera does not turn the scenery into subjects", () => {
+  const t = new Tracker(640 * 480);
+  // Everything shifts together by 25px a step: that is the camera, not the world.
+  for (let i = 0; i <= 12; i++) {
+    t.update(
+      [
+        seen("car", box(300 - i * 25, 300, 70, 70)),
+        seen("umbrella", box(420 - i * 25, 120, 70, 70)),
+        seen("bench", box(520 - i * 25, 320, 70, 70)),
+      ],
+      i * 300,
+    );
+  }
+  assert.equal(t.salient(12 * 300).length, 0, "a pan alone promotes nothing");
+  assert.equal(t.scenery(12 * 300).length, 3, "all three are scenery");
+});
+
+test("against that pan, something moving differently still stands out", () => {
+  const t = new Tracker(640 * 480);
+  for (let i = 0; i <= 12; i++) {
+    t.update(
+      [
+        seen("car", box(300 - i * 25, 300, 70, 70)),
+        seen("umbrella", box(420 - i * 25, 120, 70, 70)),
+        seen("bench", box(520 - i * 25, 320, 70, 70)),
+        // Crossing the other way while the camera pans left.
+        seen("dog", box(40 + i * 30, 220, 60, 60)),
+      ],
+      i * 300,
+    );
+  }
+  const salient = t.salient(12 * 300);
+  assert.deepEqual(salient.map((s) => s.label), ["dog"], "only the dog is doing anything");
 });

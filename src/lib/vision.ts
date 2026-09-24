@@ -35,10 +35,10 @@ import {
   countSummary,
   floorOrUnknown,
   poissonBinomial,
-} from "./calibration";
-import { SCALES } from "./scales";
-import { IDENTIFYING, type FactSheet, type Found, type Plan } from "./types";
-import { COCO_80, VOCABULARIES, type Vocabulary } from "./vocab";
+} from "./calibration.ts";
+import { SCALES } from "./scales.ts";
+import { IDENTIFYING, type FactSheet, type Found, type Plan } from "./types.ts";
+import { COCO_80, VOCABULARIES, type Vocabulary } from "./vocab/index.ts";
 
 env.allowLocalModels = false;
 

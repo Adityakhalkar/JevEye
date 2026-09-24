@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { Boxes, Toggle } from "@/components/Boxes";
-import { CHANGE_THRESHOLD, LiveWindow, toSample, type LiveFacts } from "@/lib/live";
+import { CHANGE_THRESHOLD, LiveWindow, attendingFrom, toSample, type LiveFacts } from "@/lib/live";
 import type { Found } from "@/lib/types";
 import { Tracker, heading, type Track } from "@/lib/track";
 import {
@@ -34,9 +34,22 @@ const TRACE_POINTS = 190;
  * depends on it; naming is slower and reuses its last answer in between, which
  * is fine because what is in shot changes far more slowly than the view does.
  */
+// Every second sample. Slower than that and association starts failing on
+// anything quick, which costs identity to save work the settled-check already
+// saves on a scene that is not moving.
 const DETECT_EVERY = 2;
 /** Boxes are redrawn this often, carried along their own velocity in between. */
-const PREDICT_MS = 60;
+const PREDICT_MS = 100;
+/**
+ * Below this much change, the detector is not run at all.
+ *
+ * It is the most expensive thing in the loop by an order of magnitude, and on a
+ * scene that has not moved it returns what it returned last time. The gate that
+ * decides when to ask Jev works just as well for deciding when to look.
+ */
+const REDETECT_CHANGE = 0.02;
+/** At most this many things are followed; the rest is scenery. */
+const ATTEND_TO = 3;
 
 type Judgment = {
   situation: string;
@@ -62,7 +75,9 @@ export default function LivePage() {
   const ticks = useRef(0);
   const lastNaming = useRef<Choice | null>(null);
   const tracker = useRef(new Tracker());
+  const lastDetectEmbed = useRef<Float32Array | null>(null);
   const [tracks, setTracks] = useState<Track[]>([]);
+  const [scenery, setScenery] = useState(0);
 
   const [status, setStatus] = useState<"idle" | "loading" | "running">("idle");
   const [download, setDownload] = useState<LoadProgress | null>(null);
@@ -177,11 +192,19 @@ export default function LivePage() {
      * genuinely is mostly grass. Localising the subject is the question worth
      * asking.
      */
+    // Skip the detector outright when the view has not moved since it last ran.
+    const settled =
+      lastDetectEmbed.current !== null &&
+      1 - similarity(embed, lastDetectEmbed.current) < REDETECT_CHANGE;
+
     let named = lastNaming.current;
-    if (ticks.current % DETECT_EVERY === 0 || !named) {
+    if ((ticks.current % DETECT_EVERY === 0 && !settled) || !named) {
       // Stricter than the still path: a moving wide shot throws up a lot of
       // true but irrelevant background, and the overlay has to stay readable.
-      const detections = await detectObjects(frame, 0.7, DETECT_EDGE_LIVE);
+      // Lower than it was: a small dog in a wide shot does not clear 0.7, and
+      // the clutter a looser threshold admits is what salience is for.
+      const detections = await detectObjects(frame, 0.5, DETECT_EDGE_LIVE);
+      lastDetectEmbed.current = embed;
       tracker.current.setFrameArea(surface.width * surface.height);
       tracker.current.update(
         detections.map(({ label, score, box }) => ({ label, score, box })),
@@ -210,7 +233,15 @@ export default function LivePage() {
 
     const now = Date.now();
     window_.current.push(toSample(now, embed, named));
-    const live = window_.current.facts(now, similarity);
+    const attending = tracker.current.salient(now, ATTEND_TO);
+    const setAside = tracker.current.scenery(now).length;
+    const live = window_.current.facts(
+      now,
+      similarity,
+      attending.map((t) => attendingFrom(t, now, heading(t))),
+      setAside,
+    );
+    setScenery(setAside);
     const { judge: should, reason } = window_.current.shouldJudge(now, similarity);
 
     const best = named.probabilities[0];
@@ -237,7 +268,10 @@ export default function LivePage() {
    */
   useEffect(() => {
     if (status !== "running") return;
-    const id = setInterval(() => setTracks(tracker.current.predict(Date.now())), PREDICT_MS);
+    const id = setInterval(
+      () => setTracks(tracker.current.salient(Date.now(), ATTEND_TO)),
+      PREDICT_MS,
+    );
     return () => clearInterval(id);
   }, [status]);
 
@@ -284,7 +318,9 @@ export default function LivePage() {
     ticks.current = 0;
     lastNaming.current = null;
     tracker.current.reset();
+    lastDetectEmbed.current = null;
     setTracks([]);
+    setScenery(0);
     setFound(null);
     setTrace([]);
     setEntries([]);
@@ -409,10 +445,12 @@ export default function LivePage() {
           <h2 className="mb-3 flex items-baseline justify-between text-ink-2">
             Following
             <span className="text-ink-3">
-              naming from {VOCABULARIES[vocabulary].labels.length} {vocabulary}
+              {scenery > 0 ? `${scenery} more set aside as scenery` : `from ${vocabulary}`}
             </span>
           </h2>
-          {tracks.length === 0 && <p className="text-ink-3">Nothing being followed yet.</p>}
+          {tracks.length === 0 && (
+            <p className="text-ink-3">Nothing moving yet — scenery is ignored.</p>
+          )}
           <ul className="space-y-3">
             {tracks.slice(0, 5).map((t) => (
               <li key={t.id}>

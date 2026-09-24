@@ -32,6 +32,19 @@ export const SITUATIONS: Record<string, string> = {
 function observations(facts: LiveFacts) {
   return {
     window: `the last ${facts.windowSeconds} seconds, sampled ${facts.samples} times at ${facts.samplesPerSecond} per second`,
+    /**
+     * What is being followed, which is not the same as what is present. A wide
+     * shot holds parked cars and tents; they are set aside rather than listed,
+     * because a list of scenery is not an account of what is happening.
+     */
+    being_followed:
+      facts.attending?.length > 0
+        ? facts.attending.map(
+            (a) =>
+              `${a.label} #${a.id}: ${a.heading}, in view ${a.seconds}s, covering ${Math.round(a.covers * 100)}% of the frame`,
+          )
+        : "nothing is moving; whatever is in view is holding still",
+    set_aside_as_scenery: `${facts.scenery ?? 0} other things that have not moved`,
     what_has_been_in_view: facts.subjects.map(
       (s) =>
         `${s.label}: led in ${Math.round(s.seenFraction * 100)}% of samples, mean confidence ${s.meanProbability.toFixed(2)}, ${s.trend} across the window, first seen ${s.secondsSinceFirstSeen.toFixed(1)}s ago and last seen ${s.secondsSinceLastSeen.toFixed(1)}s ago`,

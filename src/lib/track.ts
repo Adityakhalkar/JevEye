@@ -34,10 +34,46 @@ export type Track = {
   /** Box area as a share of the frame, and whether that is growing. */
   area: number;
   areaTrend: "growing" | "shrinking" | "steady";
+  /**
+   * Distance the centre has travelled *relative to the scene*, in pixels.
+   *
+   * Absolute motion is the wrong measure the moment a camera pans: everything
+   * in shot moves together, and parked cars become subjects. What distinguishes
+   * a dog crossing a field is that it moves differently from everything else.
+   */
+  travelled: number;
+  /** Share of the frame crossed per second, averaged over the track's life. */
+  pace: number;
+  /**
+   * How much this deserves attention, against everything else in view.
+   *
+   * A detector finds every car, tent and umbrella in a wide shot, and reporting
+   * them all is not understanding the scene — it is a list. What separates the
+   * dog and its handler from the parked cars behind them is that they move.
+   */
+  salience: number;
+  /** True for what has sat still long enough to be scenery. */
+  background: boolean;
 };
 
 /** Overlap below this is not the same object, however alike the labels. */
 export const IOU_GATE = 0.2;
+/**
+ * The gate relaxes as time passes between looks.
+ *
+ * Overlap is only evidence of identity when the two observations are close in
+ * time. A track first seen a moment ago has no velocity to predict with, so
+ * after a long gap the honest expectation is that it has moved some distance
+ * and overlaps its old box far less. Holding a fixed gate across any interval
+ * means a slower detector silently stops tracking anything.
+ */
+const GATE_HALVES_AFTER_MS = 500;
+const GATE_FLOOR = 0.05;
+
+export function gateFor(elapsedMs: number): number {
+  const relaxed = IOU_GATE / (1 + Math.max(0, elapsedMs) / GATE_HALVES_AFTER_MS);
+  return Math.max(GATE_FLOOR, relaxed);
+}
 /** Observations before a track is shown, so one bad frame invents nothing. */
 export const MIN_HITS = 2;
 /** Missed passes before a track is retired. */
@@ -56,6 +92,12 @@ const SMOOTHING = 0.65;
 const VELOCITY_SMOOTHING = 0.5;
 /** Area changes below this are noise, not approach. */
 const AREA_EPSILON = 0.15;
+/** Crossing less of the frame per second than this is standing still. */
+export const STILL_PACE = 0.012;
+/** How long something must sit still before it counts as scenery. */
+export const SCENERY_AFTER_MS = 2500;
+/** Newly arrived things are worth attention even before they have moved. */
+const NOVELTY_MS = 2000;
 
 export function area(box: Box): number {
   return Math.max(0, box.x2 - box.x1) * Math.max(0, box.y2 - box.y1);
@@ -78,6 +120,26 @@ export function iou(a: Box, b: Box): number {
 
 const lerp = (from: number, to: number, t: number) => from + (to - from) * t;
 
+/**
+ * How many things must be in view before their common drift can be called the
+ * camera's.
+ *
+ * With two tracks there is no majority: the median lands on whichever moved,
+ * and a lone subject gets mistaken for the scene it is crossing. Below this the
+ * safe assumption is that the camera is still and the motion is real.
+ */
+const FLOW_NEEDS = 3;
+
+/** Component-wise median of a set of shifts; zero when there are too few to trust. */
+function median2(shifts: Array<{ x: number; y: number }>): { x: number; y: number } {
+  if (shifts.length < FLOW_NEEDS) return { x: 0, y: 0 };
+  const pick = (values: number[]) => {
+    const sorted = [...values].sort((a, b) => a - b);
+    return sorted[Math.floor(sorted.length / 2)];
+  };
+  return { x: pick(shifts.map((s) => s.x)), y: pick(shifts.map((s) => s.y)) };
+}
+
 function blend(from: Box, to: Box, t: number): Box {
   return {
     x1: lerp(from.x1, to.x1, t),
@@ -95,14 +157,17 @@ export class Tracker {
   private tracks: Track[] = [];
   private nextId = 1;
   private frameArea: number;
+  private frameSpan: number;
 
   constructor(frameArea = 1) {
     this.frameArea = frameArea || 1;
+    this.frameSpan = Math.sqrt(this.frameArea) || 1;
   }
 
   /** The frame changed size, so shares of it have to be recomputed against that. */
   setFrameArea(value: number) {
     this.frameArea = value || 1;
+    this.frameSpan = Math.sqrt(this.frameArea) || 1;
   }
 
   /**
@@ -116,21 +181,44 @@ export class Tracker {
     const predicted = this.tracks.map((t) => ({ track: t, box: predictBox(t, now) }));
     const pairs: Array<{ i: number; j: number; overlap: number }> = [];
     predicted.forEach((p, i) => {
+      // How much overlap to demand depends on how long it has been since this
+      // track was last seen; see `gateFor`.
+      const gate = gateFor(now - p.track.lastSeen);
       observations.forEach((o, j) => {
         if (o.label !== p.track.label) return;
         const overlap = iou(p.box, o.box);
-        if (overlap >= IOU_GATE) pairs.push({ i, j, overlap });
+        if (overlap >= gate) pairs.push({ i, j, overlap });
       });
     });
     pairs.sort((a, b) => b.overlap - a.overlap);
 
     const takenTracks = new Set<number>();
     const takenObs = new Set<number>();
+    const matched: Array<{ track: Track; box: Box; observation: Observation; shift: { x: number; y: number } }> = [];
     for (const { i, j } of pairs) {
       if (takenTracks.has(i) || takenObs.has(j)) continue;
       takenTracks.add(i);
       takenObs.add(j);
-      this.observe(predicted[i].track, predicted[i].box, observations[j], now);
+      const from = centre(this.tracks[i] === predicted[i].track ? predicted[i].track.box : predicted[i].box);
+      const to = centre(observations[j].box);
+      matched.push({
+        track: predicted[i].track,
+        box: predicted[i].box,
+        observation: observations[j],
+        shift: { x: to.x - from.x, y: to.y - from.y },
+      });
+    }
+
+    /**
+     * The scene's own drift, taken as the median of everything that moved.
+     *
+     * A median rather than a mean: when a camera pans, most of what is in shot
+     * is scenery carried along by it, and the few things genuinely moving
+     * should not drag the estimate they are being measured against.
+     */
+    const flow = median2(matched.map((m) => m.shift));
+    for (const m of matched) {
+      this.observe(m.track, m.box, m.observation, now, flow);
     }
 
     predicted.forEach((p, i) => {
@@ -152,6 +240,10 @@ export class Tracker {
         lastSeen: now,
         area: area(o.box) / this.frameArea,
         areaTrend: "steady",
+        travelled: 0,
+        pace: 0,
+        salience: 0,
+        background: false,
       });
     });
 
@@ -161,7 +253,13 @@ export class Tracker {
     return this.confirmed();
   }
 
-  private observe(track: Track, predictedBox: Box, observation: Observation, now: number) {
+  private observe(
+    track: Track,
+    predictedBox: Box,
+    observation: Observation,
+    now: number,
+    flow: { x: number; y: number } = { x: 0, y: 0 },
+  ) {
     const dt = Math.max(now - track.lastSeen, 1);
     /**
      * Measured against the last *observation*, not the prediction.
@@ -189,6 +287,49 @@ export class Tracker {
     const change = previousArea > 0 ? (track.area - previousArea) / previousArea : 0;
     track.areaTrend =
       change > AREA_EPSILON ? "growing" : change < -AREA_EPSILON ? "shrinking" : "steady";
+
+    // Distance is accumulated rather than sampled: something that drifts
+    // steadily and something that jitters in place look alike frame to frame,
+    // and only the total separates them.
+    // Measured against the scene's drift, so a pan does not promote scenery.
+    const moved = Math.hypot(after.x - before.x - flow.x, after.y - before.y - flow.y);
+    track.travelled += moved;
+    this.rate(track, now);
+  }
+
+  /**
+   * Motion as a share of the frame per second, and what follows from it.
+   *
+   * Pace rather than raw pixels, so the judgement holds whatever the video's
+   * size. Size counts too, but less: a lorry parked across the shot is scenery,
+   * while a small thing crossing it is the story.
+   */
+  private rate(track: Track, now: number) {
+    const seconds = Math.max((now - track.firstSeen) / 1000, 0.3);
+    track.pace = track.travelled / this.frameSpan / seconds;
+    const fresh = now - track.firstSeen < NOVELTY_MS;
+    track.background =
+      !fresh && track.pace < STILL_PACE && now - track.firstSeen > SCENERY_AFTER_MS;
+    track.salience = track.pace * 3 + Math.sqrt(track.area) * 0.5 + (fresh ? 0.15 : 0);
+  }
+
+  /**
+   * The few things worth reporting, most deserving first.
+   *
+   * Everything the detector found is still tracked — a question about the
+   * background can still be answered — but scenery is not what the view is
+   * about, and a list of eleven parked cars is not an understanding of it.
+   */
+  salient(now: number, limit = 3): Track[] {
+    return this.predict(now)
+      .filter((t) => !t.background)
+      .sort((a, b) => b.salience - a.salience)
+      .slice(0, limit);
+  }
+
+  /** Everything currently held, scenery included. */
+  scenery(now: number): Track[] {
+    return this.predict(now).filter((t) => t.background);
   }
 
   /**

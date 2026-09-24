@@ -179,6 +179,32 @@ It changes three answers:
 
 Counting is real again, too. `count` asks the detector for instances and runs the Poisson-binomial over its per-box confidences, so "how many dogs" returns a number and an interval rather than a count of tiles. When the subject is outside its 80 categories the tile coverage is still reported — and the answer says which of the two it is, because they are different claims.
 
+### Attention: what is worth following
+
+A detector finds everything. On a wide shot of a dog agility run that means
+eleven parked cars, the tents behind them, and every umbrella — and a list of
+eleven parked cars is not an understanding of the scene. What separates the dog
+and its handler from the car park is that they move.
+
+Each track carries a **pace**: distance travelled as a share of the frame per
+second. Something slower than 0.012 for more than two and a half seconds is
+scenery, is still tracked, and is not reported. Newly arrived things are attended
+to before they have moved, since arriving is itself the event.
+
+The measure is taken **against the scene's own drift**, because absolute motion
+is the wrong one the moment a camera pans: everything in shot moves together and
+the car park becomes the subject. The drift is the median shift of everything
+matched this pass — a median because most of what is in view during a pan is
+scenery being carried along, and the few things genuinely moving should not drag
+the estimate they are measured against. Below three tracks there is no majority
+to take a median of, so the camera is assumed still rather than guessed at.
+
+```
+eight parked cars, one dog, one person   ->  followed: dog, person
+whole scene panning together             ->  followed: nothing
+that same pan, one dog crossing it       ->  followed: dog
+```
+
 ### Tracking
 
 A detector answers "what is in this frame" and nothing else. Run it twice and you get two unrelated lists, which is why boxes jump: nothing claims that this dog is the same dog as a moment ago. `src/lib/track.ts` adds that claim, by the standard method — associate by overlap, carry a velocity, predict between observations, retire what stops being seen. No Kalman filter; a constant-velocity estimate with exponential smoothing behaves almost the same at these rates and is far easier to reason about when a result looks wrong.

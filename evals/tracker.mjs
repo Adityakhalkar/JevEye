@@ -78,21 +78,62 @@ const SCENARIOS = {
     }
     return frames;
   },
+
+  /**
+   * The case appearance exists for: two things cross while the detector cannot
+   * see them, and on reappearance they are on each other's old side. Overlap
+   * has nothing to go on — the prediction for each lands where the other now
+   * is — so this is where identity is won or lost.
+   */
+  "crossing behind an occlusion": () => crossingWithGap(),
+
 };
 
-/** Which track best explains a ground-truth object this frame. */
-function bestMatch(tracks, truth) {
-  let best = null;
-  let bestOverlap = 0.3;
-  for (const t of tracks) {
-    if (t.label !== truth.label) continue;
-    const overlap = iou(t.box, truth.box);
-    if (overlap > bestOverlap) {
-      bestOverlap = overlap;
-      best = t;
-    }
+function crossingWithGap() {
+  const frames = [];
+  for (let i = 0; i < 20; i++) {
+    const truth = [
+      { id: "A", label: "person", box: box(20 + i * 28, 200) },
+      { id: "B", label: "person", box: box(580 - i * 28, 200) },
+    ];
+    // Hidden exactly while they pass through one another.
+    const hidden = i >= 9 && i <= 11;
+    frames.push({
+      truth,
+      seen: hidden ? [] : truth.map((t) => ({ ...t, score: 0.9 })),
+    });
   }
-  return best;
+  return frames;
+}
+
+/**
+ * Assign ground truth to tracks one-to-one, best overlap first.
+ *
+ * Matching each object independently is wrong precisely where it matters: when
+ * two things cross, both can claim the same track, and the scorer reports an
+ * identity switch the tracker never made. MOT metrics use a one-to-one
+ * assignment for this reason, and a scorer that invents failures is worse than
+ * no scorer at all.
+ */
+function assign(tracks, truths, gate = 0.3) {
+  const pairs = [];
+  truths.forEach((truth, ti) => {
+    tracks.forEach((track, ki) => {
+      if (track.label !== truth.label) return;
+      const overlap = iou(track.box, truth.box);
+      if (overlap >= gate) pairs.push({ ti, ki, overlap });
+    });
+  });
+  pairs.sort((a, b) => b.overlap - a.overlap);
+
+  const matched = new Map();
+  const usedTracks = new Set();
+  for (const { ti, ki } of pairs) {
+    if (matched.has(ti) || usedTracks.has(ki)) continue;
+    matched.set(ti, tracks[ki]);
+    usedTracks.add(ki);
+  }
+  return { matched, usedTracks };
 }
 
 function run(name, frames) {
@@ -112,21 +153,19 @@ function run(name, frames) {
     // Judge against predicted positions: this is what a viewer sees.
     const tracks = tracker.predict(now);
 
-    for (const truth of frame.truth) {
+    const { matched, usedTracks } = assign(tracks, frame.truth);
+    frame.truth.forEach((truth, ti) => {
       total += 1;
-      const match = bestMatch(tracks, truth);
-      if (!match) continue;
+      const match = matched.get(ti);
+      if (!match) return;
       covered += 1;
       const previous = assigned.get(truth.id);
       if (previous !== undefined && previous !== match.id) switches += 1;
       assigned.set(truth.id, match.id);
-    }
+    });
 
     // Tracks matching nothing real are inventions.
-    const claimed = new Set(
-      frame.truth.map((t) => bestMatch(tracks, t)?.id).filter((id) => id !== undefined),
-    );
-    ghosts += tracks.filter((t) => !claimed.has(t.id)).length;
+    ghosts += tracks.filter((_, ki) => !usedTracks.has(ki)).length;
   });
 
   return {
@@ -143,6 +182,10 @@ const THRESHOLDS = {
   "a subject the detector loses for three passes": { switches: 1, coverage: 0.6, ghostFrames: 2 },
   "noisy boxes around a steady subject": { switches: 0, coverage: 0.85, ghostFrames: 0 },
   "two of the same kind crossing paths": { switches: 2, coverage: 0.8, ghostFrames: 2 },
+  // Appearance is the whole point here: a swap means the gate did not work.
+  // Velocity carries each track through the gap on its own side, so identity
+  // survives without appearance features.
+  "crossing behind an occlusion": { switches: 0, coverage: 0.5, ghostFrames: 4 },
 };
 
 export function evaluateTracker() {

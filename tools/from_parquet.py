@@ -18,7 +18,9 @@ import numpy as np
 import pyarrow.parquet as pq
 from PIL import Image
 
-shard_dir, out_dir = Path(sys.argv[1]), Path(sys.argv[2])
+# Absolute, because the manifests are read by the embedder from another
+# directory and a relative path silently becomes a 404 there.
+shard_dir, out_dir = Path(sys.argv[1]).resolve(), Path(sys.argv[2]).resolve()
 (out_dir / "jpg").mkdir(parents=True, exist_ok=True)
 
 SEED = 0

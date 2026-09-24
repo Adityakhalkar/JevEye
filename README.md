@@ -251,9 +251,12 @@ Unit tests say the code does what it was written to do. These say the system is 
 | one subject crossing the frame | 0 | 95% | 0 |
 | detector loses it for three passes | 0 | 80% | 0 |
 | noisy boxes around a steady subject | 0 | 95% | 0 |
-| **two of the same kind crossing paths** | **2** | 95% | 1 |
+| two of the same kind crossing paths | 0 | 95% | 0 |
+| crossing behind an occlusion | 0 | 80% | 0 |
 
-That last row is the honest limit: greedy overlap association swaps identities when two same-label objects cross. Fixing it needs appearance features per track, not better bookkeeping.
+An earlier version of this table reported two identity switches on the crossing case, and this README called it an honest limitation needing appearance features. It was not a limitation. The scorer matched each ground-truth object to its best-overlapping track *independently*, so at the moment two objects coincide both could claim the same track and the scorer invented a switch the tracker never made. MOT metrics assign one-to-one for exactly this reason.
+
+The appearance features written to fix the phantom limitation were then removed: with the scorer corrected, constant-velocity prediction already carries each track through an occluded crossing on its own side, and shipping a mechanism that no measurement justifies is how a codebase fills with things nobody can defend. A scorer that invents failures is worse than no scorer at all.
 
 **How Jev reads questions** runs 24 fixed cases through the real planner, because it is the one component whose behaviour changes without the code changing. Where more than one reading is defensible the case accepts a set — "what kind of flower is this" is legitimately `only` or `dominant`, and scoring it as a single right answer would measure the rubric rather than the model.
 

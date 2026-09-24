@@ -7,14 +7,34 @@
  */
 import { readFileSync } from "node:fs";
 
-const FLOOR = { accuracy: 0.9, ece: 0.05 };
+/**
+ * Floors per probe, because the tasks are not comparable.
+ *
+ * Flowers are one subject photographed deliberately; COCO crops are whatever
+ * happened to be in frame, at any size, partly occluded, across 80 classes that
+ * include car against truck against bus. Holding both to one bar would mean
+ * either excusing the first or failing the second for being harder.
+ */
+const FLOORS = {
+  flowers: { accuracy: 0.9, ece: 0.05 },
+  objects: { accuracy: 0.65, ece: 0.05 },
+};
 
 export function evaluateProbe() {
+  let failures = 0;
+  console.log("\nSHIPPED PROBES");
+  for (const [name, FLOOR] of Object.entries(FLOORS)) {
+    failures += checkOne(name, FLOOR);
+  }
+  return failures;
+}
+
+function checkOne(name, FLOOR) {
   let meta;
   try {
-    meta = JSON.parse(readFileSync(new URL("../public/probes/flowers.json", import.meta.url)));
+    meta = JSON.parse(readFileSync(new URL(`../public/probes/${name}.json`, import.meta.url)));
   } catch {
-    console.log("\nSHIPPED PROBE\n  FAIL  no probe artifact found in public/probes");
+    console.log(`  FAIL  ${name}: no probe artifact in public/probes`);
     return 1;
   }
 
@@ -29,13 +49,14 @@ export function evaluateProbe() {
     ],
   ];
 
-  console.log("\nSHIPPED PROBE");
   let failures = 0;
-  for (const [name, value, ok, bound] of checks) {
+  for (const [label, value, ok, bound] of checks) {
     if (!ok) failures += 1;
-    console.log(`  ${ok ? "pass" : "FAIL"}  ${name.padEnd(18)} ${value.toFixed(4)} (${bound})`);
+    console.log(
+      `  ${ok ? "pass" : "FAIL"}  ${name}: ${label.padEnd(18)} ${value.toFixed(4)} (${bound})`,
+    );
   }
-  console.log(`  trained on: ${meta.trained_on}`);
+  console.log(`        ${meta.train_images ?? "?"} training images — ${meta.trained_on}`);
   return failures;
 }
 

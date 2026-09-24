@@ -202,9 +202,9 @@ Ten times faster, same dog. Live runs at 400, stills at 560 where a little more 
 
 In the live view the detector runs every second sample rather than every one: embedding a frame costs ~15 ms and detection closer to a second, so drift is measured continuously while naming reuses its last answer in between. What is in shot changes far more slowly than the view does.
 
-## The trained probe
+## The trained probes
 
-Naming flowers used to be zero-shot: score the image against 102 sentences and take the best. That is weak on fine-grained species, so there is now a linear probe — a logistic regression on CLIP's frozen 512-d embeddings, fitted on Oxford Flowers-102's own train+val split, with a temperature fitted separately on held-out images so the confidence means something.
+Both shipped vocabularies now have a fitted probe. Naming used to be zero-shot everywhere: score the image against the label sentences and take the best. That is weak on fine-grained species, so there is now a linear probe — a logistic regression on CLIP's frozen 512-d embeddings, fitted on Oxford Flowers-102's own train+val split, with a temperature fitted separately on held-out images so the confidence means something.
 
 Measured on 1,500 test images that neither the probe nor the temperature ever saw:
 
@@ -215,7 +215,31 @@ Measured on 1,500 test images that neither the probe nor the temperature ever sa
 
 Chance is 1.0%. The full report is in [`docs/probe-report.json`](docs/probe-report.json).
 
-### How much data it wanted
+### Objects
+
+COCO's 80 categories had no training at all until now — the detector knew them, the classifier was guessing. The probe is fitted on 7,643 instance crops from val2017, split **by image** so two crops from one photograph cannot land either side of the test boundary and measure memorisation. Each class is capped, because `person` appears about eleven thousand times in val2017 and `hair drier` eleven; fitted unchecked, a probe learns the prior instead of the classes.
+
+| | zero-shot | trained probe |
+|---|---|---|
+| on held-out crops | 58.8% | **70.9%** |
+| **on whole images** | 44.9% | **67.9%** |
+| ECE on crops | 0.032 | **0.016** |
+
+The second row is the one that decided whether to ship it. The probe is fitted on crops while the app classifies whole images and tiles, which is a distribution mismatch and a good reason to expect it to transfer badly. It does the opposite: +23 points on whole images, a larger gain than on the crops it was trained for. Calibration is the honest caveat — the temperature was fitted on crops, and on whole images ECE is 0.077 rather than 0.016.
+
+Its curve is genuinely flat, unlike the flowers one:
+
+| crops | per class | accuracy |
+|---|---|---|
+| 763 | 10 | 59.1% |
+| 1,915 | 24 | 65.9% |
+| 3,824 | 48 | 70.0% |
+| 5,728 | 72 | 70.8% |
+| 7,643 | 96 | **70.9%** |
+
+Past about 48 crops per class the line stops moving, so more COCO would not buy much. 70.9% also sounds poor next to the flowers probe's 96.9%, and the tasks are not comparable: a flower is one subject photographed deliberately, while a COCO crop is whatever happened to be in frame, at any size, partly occluded, among 80 classes that include car against truck against bus.
+
+### How much data the flower probe wanted
 
 The first probe was fitted on 2,040 images — Flowers-102's own protocol, ten per class — and scored 92.8%. Asked whether that was enough, I reasoned it was within about three points of the backbone's ceiling and that more data would not be worth the effort. That was an assertion, so `tools/curve.py` measured it: the same probe fitted on growing stratified fractions, every one scored on the same held-out images.
 

@@ -59,6 +59,7 @@ export const VOCABULARIES: Record<VocabularyId, Vocabulary> = {
       "a cropped photo of a {}.",
       "a photo of a {} in the real world.",
     ],
+    probe: "/probes/objects",
   },
 };
 

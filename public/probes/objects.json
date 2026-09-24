@@ -1,0 +1,12 @@
+{
+  "classes": 80,
+  "dim": 512,
+  "temperature": 0.7899988616731884,
+  "accuracy": 0.7087033747779752,
+  "ece": 0.015699145835733317,
+  "trained_on": "COCO val2017 instance crops, 7,643 of them (95 per class), CLIP ViT-B/32 q8 embeddings",
+  "train_images": 7643,
+  "zero_shot_baseline": 0.5882770870337478,
+  "whole_image_accuracy": 0.679,
+  "whole_image_note": "Fitted on crops; on whole images labelled by their largest object it scores 67.9% against zero-shot's 44.9%, with ECE 0.077 rather than the 0.016 it reaches on crops."
+}

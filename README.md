@@ -62,7 +62,7 @@ Why this is not just a VLM with extra steps: a VLM collapses seeing and judging 
   <img src="docs/jeveye-live.png" alt="JevEye Live: the video feed, what is in view, and a sawtooth trace of how far the view has drifted, with a marker each time Jev was asked" width="820">
 </p>
 
-`/live` watches a video feed instead of a still image. Perception and judgment run at different speeds, and the gap between them is the design:
+`/live` watches a video feed instead of a still image — your camera, a video file you drop on it, or the sample clip. Files are read locally like everything else here; nothing is uploaded. Perception and judgment run at different speeds, and the gap between them is the design:
 
 | | measured |
 |---|---|
@@ -95,7 +95,9 @@ Forty seconds of the sample clip cost **$0.000235** across 7 judgments. A still 
 
 Known limits, on top of everything below:
 
-- **One vocabulary, chosen for you.** A still-image question lets Jev pick the label set; a camera has no question, so live always uses COCO-80. Point it at flowers and it reaches for "vase" — visible in the window above.
+- **One vocabulary, chosen for you, and it is the binding limit.** A still-image question lets Jev pick the label set; a camera has no question, so live always uses COCO-80. On the sample clip — a dog agility run, with a dog and a handler plainly in shot — it reports "frisbee" and "chair" and cannot name anything at all in 17 of 30 samples. The gate, the window and the judgments all work on that footage; the naming does not.
+
+  Sampling the frame's quarters as well and keeping the most confident of the five was tried and reverted. It cut unnameable samples to 1 in 19 and made the naming worse: "sports ball" at 0.53 on the same course. Picking the best of five inflates confidence by selection alone, so it bought fabricated certainty in exchange for an honest abstention. Letting the "watching for" text pick the vocabulary is the fix worth making.
 - **Whole frames only.** No tiling, so there is no coverage or spatial detail per frame; the grid would cost 16 embeddings per sample.
 - **No model of action.** CLIP reads single frames. "Rising confidence" approximates approach; falling over, reaching, handing something across would need a temporal encoder.
 - **It cannot do reflexes.** At ~1.1 s, nothing that needs a sub-second response should route through Jev. This is the slow, interpretive loop.

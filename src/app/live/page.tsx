@@ -47,6 +47,10 @@ export default function LivePage() {
   const [spend, setSpend] = useState(0);
   const [error, setError] = useState<string | null>(null);
 
+  const objectUrl = useRef<string | null>(null);
+  const filePicker = useRef<HTMLInputElement>(null);
+  const [sourceName, setSourceName] = useState<string | null>(null);
+
   const watchingRef = useRef(watching);
   useEffect(() => {
     watchingRef.current = watching;
@@ -85,6 +89,17 @@ export default function LivePage() {
     if (!context) return;
     context.drawImage(element, 0, 0, surface.width, surface.height);
 
+    /**
+     * The whole frame only.
+     *
+     * Sampling the quarters as well and keeping the most confident of the five
+     * cut unnameable samples from 17 in 30 to 1 in 19 — and made the naming
+     * worse, not better: an agility course came back "sports ball" and
+     * "frisbee" while the dog and handler went unmentioned. Picking the best of
+     * five inflates confidence by selection alone, so the result was fabricated
+     * certainty in place of an honest abstention. The wide-scene problem is
+     * real, but it belongs to the vocabulary, not the sampling.
+     */
     const [embed] = await embedImages([RawImage.fromCanvas(surface)]);
     const [named] = await classify([embed], VOCABULARIES.objects);
 
@@ -129,9 +144,29 @@ export default function LivePage() {
     };
   }, [status, tick]);
 
+  /** Point the loop at a video file the viewer chose. It is read locally. */
+  function openVideoFile(file: File | null | undefined) {
+    if (!file) return;
+    if (!file.type.startsWith("video/")) {
+      setError("That is not a video this browser can play. MP4 or WebM work.");
+      return;
+    }
+    if (objectUrl.current) URL.revokeObjectURL(objectUrl.current);
+    objectUrl.current = URL.createObjectURL(file);
+    setSourceName(file.name);
+    void start(objectUrl.current);
+  }
+
   async function start(source: "camera" | string) {
     setError(null);
     setStatus("loading");
+    // A new source starts a new history; keeping the old trace would imply
+    // drift between two unrelated scenes.
+    window_.current = new LiveWindow();
+    setTrace([]);
+    setEntries([]);
+    setFacts(null);
+    setNow(null);
     await warmUp(setDownload);
     setDownload(null);
 
@@ -139,6 +174,7 @@ export default function LivePage() {
     if (!element) return;
     try {
       if (source === "camera") {
+        setSourceName("your camera");
         element.srcObject = await navigator.mediaDevices.getUserMedia({
           video: { width: 640, height: 480 },
           audio: false,
@@ -161,6 +197,13 @@ export default function LivePage() {
     running.current = true;
     setStatus("running");
   }
+
+  useEffect(
+    () => () => {
+      if (objectUrl.current) URL.revokeObjectURL(objectUrl.current);
+    },
+    [],
+  );
 
   function stop() {
     running.current = false;
@@ -192,7 +235,14 @@ export default function LivePage() {
       </header>
 
       <div className="grid items-start gap-4 lg:grid-cols-[1.6fr_1fr]">
-        <figure className="relative overflow-hidden rounded-lg border border-rule bg-panel">
+        <figure
+          onDragOver={(e) => e.preventDefault()}
+          onDrop={(e) => {
+            e.preventDefault();
+            openVideoFile(e.dataTransfer.files?.[0]);
+          }}
+          className="relative overflow-hidden rounded-lg border border-rule bg-panel"
+        >
           <video ref={video} playsInline muted className="block w-full" />
           <canvas ref={canvas} className="hidden" />
           {now && status === "running" && (
@@ -212,7 +262,7 @@ export default function LivePage() {
                 ? `Loading the model, ${download.percent}% — first visit only`
                 : status === "loading"
                   ? "Starting up"
-                  : "Nothing yet. Point it at something."}
+                  : "Drop a video here, use your camera, or play the sample clip."}
             </div>
           )}
         </figure>
@@ -309,6 +359,12 @@ export default function LivePage() {
               Use my camera
             </button>
             <button
+              onClick={() => filePicker.current?.click()}
+              className="rounded border border-rule px-4 py-2 text-ink-2 hover:border-ink-3 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-trace"
+            >
+              Open a video file
+            </button>
+            <button
               onClick={() => start("/sample.mp4")}
               className="rounded border border-rule px-4 py-2 text-ink-2 hover:border-ink-3 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-trace"
             >
@@ -316,6 +372,14 @@ export default function LivePage() {
             </button>
           </>
         )}
+        <input
+          ref={filePicker}
+          type="file"
+          accept="video/*"
+          className="hidden"
+          onChange={(e) => openVideoFile(e.target.files?.[0])}
+        />
+        {sourceName && <span className="text-ink-3">watching {sourceName}</span>}
       </div>
 
       {error && (

@@ -56,6 +56,44 @@ JEV JUDGES                                        $0.000035
 
 Why this is not just a VLM with extra steps: a VLM collapses seeing and judging into one opaque pass, and its confidence is about tokens rather than about the world. Here the seeing and the judging are separate, each reports its own uncertainty, and the fact sheet between them is readable — you can see what it thought it saw before it concluded anything.
 
+## JevEye Live
+
+`/live` watches a video feed instead of a still image. Perception and judgment run at different speeds, and the gap between them is the design:
+
+| | measured |
+|---|---|
+| Embedding one frame | ~15 ms |
+| A Jev round trip | ~1.1 s median (395–1553 ms) |
+
+Seventy times apart, so Jev cannot sit in the frame loop. Instead frames are embedded continuously and **the embeddings themselves are the gate**: consecutive frames are unit vectors, so their cosine distance says how much the view moved. No motion estimation, no second model, no threshold tuned against pixels. Jev is asked only when the view moves past 0.12, when the leading label changes, or on a 20-second heartbeat — and never more than once every 2.5 s, since a call takes 1.1.
+
+This is the JevNQL shape moved from rows to time: a cheap deterministic filter upstream, the expensive semantic judgment only on what survives.
+
+What Jev gets is a **window**, not a frame:
+
+```text
+the last 8.8 seconds, sampled 30 times at 3.4 per second
+  dog    led in 57% of samples, mean 0.47, rising across the window,
+         last seen 0.0s ago
+  vase   led in 33% of samples, mean 0.17, falling, last seen 6.0s ago
+  nothing nameable in 3 of 30 samples
+  the view moved 0.42 since you last looked
+
+→ "something is arriving or coming closer" · confidence 0.55
+  attention 1.70 · settled 0.19 · $0.000034
+```
+
+That is the point of using a semantic model here at all. A per-frame classifier can say a dog is present; only the window says it is **rising** — which is what "coming closer" means. Same shape as *"seem increasingly dissatisfied"* in JevNQL: a trend judged over a history rather than a value read off one row.
+
+Forty seconds of the sample clip cost **$0.000235** across 7 judgments. A still scene costs nothing at all, which is asserted in `src/lib/live.test.ts` rather than claimed.
+
+Known limits, on top of everything below:
+
+- **One vocabulary, chosen for you.** A still-image question lets Jev pick the label set; a camera has no question, so live always uses COCO-80. Point it at flowers and it reaches for "vase" — visible in the window above.
+- **Whole frames only.** No tiling, so there is no coverage or spatial detail per frame; the grid would cost 16 embeddings per sample.
+- **No model of action.** CLIP reads single frames. "Rising confidence" approximates approach; falling over, reaching, handing something across would need a temporal encoder.
+- **It cannot do reflexes.** At ~1.1 s, nothing that needs a sub-second response should route through Jev. This is the slow, interpretive loop.
+
 ## Run it
 
 Needs Node 20+ and a [TypeSafe](https://typesafe.ai) API key.

@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useCallback, useRef, useState } from "react";
 
 import { CALIBRATION } from "@/lib/calibration";
@@ -105,7 +106,10 @@ export default function Page() {
         <h1 className="text-lg font-semibold tracking-tight text-neutral-50">JevEye</h1>
         <p className="mt-1 max-w-xl text-neutral-400">
           A CNN reports what it sees, with a calibrated confidence or an abstention. Jev judges what
-          that means. The image never leaves this browser — only the fact sheet does.
+          that means. The image never leaves this browser — only the fact sheet does.{" "}
+          <Link href="/live" className="underline hover:text-neutral-300">
+            live video →
+          </Link>
         </p>
       </header>
 

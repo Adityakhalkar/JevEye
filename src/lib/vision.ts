@@ -263,7 +263,19 @@ export type Choice = {
  */
 export async function chooseBatch(images: RawImage[], vocab: Vocabulary): Promise<Choice[]> {
   if (images.length === 0) return [];
-  const [embeds, probe] = await Promise.all([embedImages(images), loadProbe(vocab)]);
+  return classify(await embedImages(images), vocab);
+}
+
+/**
+ * Name already-embedded images.
+ *
+ * Split out from `chooseBatch` so a caller that needs the embedding for
+ * something else — the live loop compares consecutive ones — pays for the
+ * forward pass once.
+ */
+export async function classify(embeds: Float32Array[], vocab: Vocabulary): Promise<Choice[]> {
+  if (embeds.length === 0) return [];
+  const probe = await loadProbe(vocab);
 
   let perImage: number[][];
   let source: Choice["source"];
@@ -300,6 +312,16 @@ export async function chooseBatch(images: RawImage[], vocab: Vocabulary): Promis
 
 export async function choose(image: RawImage, vocab: Vocabulary): Promise<Choice> {
   return (await chooseBatch([image], vocab))[0];
+}
+
+/**
+ * How alike two frames are, from their embeddings alone.
+ *
+ * Both vectors are unit length, so this is the cosine. It costs one dot product
+ * and no model, which is what makes it usable as the gate in front of Jev.
+ */
+export function similarity(a: Float32Array, b: Float32Array): number {
+  return dot(a, b);
 }
 
 /** Position along ordered levels, 0 = first level, 1 = last. */

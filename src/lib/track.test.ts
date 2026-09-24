@@ -14,7 +14,7 @@ import {
   predictBox,
   type Box,
 } from "./track.ts";
-import { asCanvas, boxAt, canvasOf, emptyScene, FRAME, sceneWith } from "./scene.mock.ts";
+import { boxAt, emptyScene, FRAME, sceneWith } from "./scene.mock.ts";
 
 const box = (x: number, y: number, w = 100, h = 100): Box => ({
   x1: x,
@@ -281,14 +281,8 @@ test("against that pan, something moving differently still stands out", () => {
  * an assumption about it.
  */
 
-const lit = (x: number, y: number) => ({
-  source: asCanvas(sceneWith(x, y)),
-  scratch: asCanvas(canvasOf(24, 24, () => 0)),
-});
-const empty = () => ({
-  source: asCanvas(emptyScene()),
-  scratch: asCanvas(canvasOf(24, 24, () => 0)),
-});
+const lit = sceneWith;
+const empty = emptyScene;
 
 /** A tracker holding one confirmed track on a subject at (100, 80), standing still. */
 function watching() {

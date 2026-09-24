@@ -13,12 +13,10 @@
  * almost identically at these frame rates and is far easier to reason about.
  */
 
-import { print, relock, type Print } from "./lock.ts";
+import { print, relock, type Frame, type Print } from "./lock.ts";
 
 export type Box = { x1: number; y1: number; x2: number; y2: number };
 
-/** The current frame, and a canvas to resample through. */
-export type Sight = { source: HTMLCanvasElement; scratch: HTMLCanvasElement };
 
 export type Observation = { label: string; score: number; box: Box };
 
@@ -109,6 +107,9 @@ export const LOOK_MIN_MS = 30;
  * which is what carries identity through a crossing in the first place.
  */
 export const LOCK_CLAIM = 0.5;
+
+/** How many things are worth holding a box on, when nobody says otherwise. */
+export const ATTEND_LIMIT = 3;
 /**
  * The gate relaxes as time passes between looks.
  *
@@ -228,7 +229,7 @@ export class Tracker {
    * handful of boxes the two agree almost always, and greedy is far easier to
    * follow when a result looks wrong.
    */
-  update(observations: Observation[], now: number, frame?: Sight): Track[] {
+  update(observations: Observation[], now: number, frame?: Frame): Track[] {
     const predicted = this.tracks.map((t) => ({ track: t, box: predictBox(t, now) }));
     const pairs: Array<{ i: number; j: number; overlap: number }> = [];
     predicted.forEach((p, i) => {
@@ -315,7 +316,7 @@ export class Tracker {
     observation: Observation,
     now: number,
     flow: { x: number; y: number } = { x: 0, y: 0 },
-    frame?: Sight,
+    frame?: Frame,
   ) {
     const dt = Math.max(now - track.lastSeen, 1);
     /**
@@ -362,9 +363,9 @@ export class Tracker {
    * anywhere — leaves the previous one in place rather than clearing it: one
    * awkward crop is not a reason to throw away a working template.
    */
-  private remember(track: Track, frame?: Sight) {
+  private remember(track: Track, frame?: Frame) {
     if (!frame) return;
-    track.template = print(frame.source, track.box, frame.scratch) ?? track.template;
+    track.template = print(frame, track.box) ?? track.template;
     if (track.template) track.lock = 1;
   }
 
@@ -382,11 +383,25 @@ export class Tracker {
    * instead of blinking out. The detector's own miss count is untouched, so
    * MAX_MISSES still retires anything it has genuinely stopped finding.
    */
-  look(frame: Sight, now: number): void {
+  look(frame: Frame, now: number, limit = ATTEND_LIMIT): void {
+    /*
+     * Only the few things actually being shown.
+     *
+     * Matching every parked car and umbrella in a wide shot is what took this
+     * from one millisecond a frame to thirty, and none of those boxes is drawn:
+     * the view attends to a handful, and the rest is scenery whose position
+     * nobody is looking at. Ordered by salience so the ones on screen are the
+     * ones kept, and the boxes that matter hold whatever else is in shot.
+     */
+    const candidates = this.tracks
+      .filter((t) => t.template && !t.background)
+      .sort((a, b) => b.salience - a.salience)
+      .slice(0, limit);
+
     const claims: Array<{ track: Track; found: NonNullable<ReturnType<typeof relock>> }> = [];
-    for (const track of this.tracks) {
+    for (const track of candidates) {
       if (!track.template) continue;
-      const found = relock(frame.source, track.template, predictBox(track, now), frame.scratch);
+      const found = relock(frame, track.template, predictBox(track, now));
       track.lock = found ? Math.max(found.score, 0) : 0;
       if (found && found.score >= LOCK_KEEP) claims.push({ track, found });
     }

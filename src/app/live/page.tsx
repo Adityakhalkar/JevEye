@@ -6,6 +6,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { Boxes, Toggle } from "@/components/Boxes";
 import { CHANGE_THRESHOLD, LiveWindow, attendingFrom, toSample, type LiveFacts } from "@/lib/live";
+import { frameOf, type Frame } from "@/lib/lock";
 import { difference, thumbnail, type Thumb } from "@/lib/motion";
 import type { Found } from "@/lib/types";
 import { Tracker, heading, type Track } from "@/lib/track";
@@ -73,27 +74,28 @@ function offscreen(ref: { current: HTMLCanvasElement | null }): HTMLCanvasElemen
 }
 
 /**
- * A private copy of a frame, at the size the tracker measures boxes in.
+ * A frame read into plain brightness values, in the pixels boxes are measured in.
  *
  * Both the print taken at identification and the frame searched afterwards have
- * to be in the same pixel coordinates as the boxes, and neither can share the
- * sampling canvas: that one is redrawn every sample, so a detection still in
- * flight would have its print cut from a later frame than the one it saw.
+ * to share the boxes' coordinates, and neither can share the sampling canvas:
+ * that one is redrawn every sample, so a detection still in flight would have
+ * its print cut from a later frame than the one it saw.
  */
-function copyOf(
+function frameCopy(
   ref: { current: HTMLCanvasElement | null },
   sized: HTMLCanvasElement,
   from: CanvasImageSource = sized,
-): HTMLCanvasElement | null {
+  reuse?: Frame | null,
+): Frame | null {
   const target = offscreen(ref);
   if (target.width !== sized.width || target.height !== sized.height) {
     target.width = sized.width;
     target.height = sized.height;
   }
-  const context = target.getContext("2d");
+  const context = target.getContext("2d", { willReadFrequently: true });
   if (!context) return null;
   context.drawImage(from, 0, 0, target.width, target.height);
-  return target;
+  return frameOf(target, reuse);
 }
 
 export default function LivePage() {
@@ -122,12 +124,21 @@ export default function LivePage() {
    */
   const identified = useRef<HTMLCanvasElement | null>(null);
   const searching = useRef<HTMLCanvasElement | null>(null);
-  const lockScratch = useRef<HTMLCanvasElement | null>(null);
+  /** The search frame's buffer, reused so the collector has nothing to do. */
+  const searchFrame = useRef<Frame | null>(null);
   const lastDetectEmbed = useRef<Float32Array | null>(null);
   const [tracks, setTracks] = useState<Track[]>([]);
   const [scenery, setScenery] = useState(0);
   /** Where a sample's time went, so slowness can be located rather than guessed at. */
-  const [cost, setCost] = useState<{ embed: number; detect: number; name: number; total: number } | null>(null);
+  const [cost, setCost] = useState<{
+    embed: number;
+    detect: number;
+    name: number;
+    total: number;
+    look: number;
+  } | null>(null);
+  /** What the visual lock costs per frame, for the same reason as the rest. */
+  const lookMs = useRef(0);
 
   const [status, setStatus] = useState<"idle" | "loading" | "running">("idle");
   const [download, setDownload] = useState<LoadProgress | null>(null);
@@ -277,7 +288,7 @@ export default function LivePage() {
       detecting.current = true;
       const capturedAt = Date.now();
       const capturedThumb = thumb;
-      const capturedFrame = copyOf(identified, surface);
+      const capturedFrame = frameCopy(identified, surface);
       void (async () => {
         try {
           const beforeDetect = performance.now();
@@ -288,7 +299,7 @@ export default function LivePage() {
           tracker.current.update(
             detections.map(({ label, score, box }) => ({ label, score, box })),
             capturedAt,
-            capturedFrame ? { source: capturedFrame, scratch: offscreen(lockScratch) } : undefined,
+            capturedFrame ?? undefined,
           );
           const best = detections.slice().sort((a, b) => b.score - a.score)[0];
           if (best) {
@@ -346,6 +357,7 @@ export default function LivePage() {
       detect: lastDetectMs.current,
       name: Math.round(nameMs),
       total: Math.round(performance.now() - began),
+      look: Math.round(lookMs.current * 10) / 10,
     });
     const { judge: should, reason } = window_.current.shouldJudge(now);
 
@@ -381,8 +393,11 @@ export default function LivePage() {
       const element = video.current;
       const sampled = canvas.current;
       if (element && sampled?.width && element.readyState >= 2) {
-        const frame = copyOf(searching, sampled, element);
-        if (frame) tracker.current.look({ source: frame, scratch: offscreen(lockScratch) }, now);
+        const before = performance.now();
+        const frame = frameCopy(searching, sampled, element, searchFrame.current);
+        searchFrame.current = frame;
+        if (frame) tracker.current.look(frame, now, ATTEND_TO);
+        lookMs.current = performance.now() - before;
       }
       setTracks(tracker.current.salient(now, ATTEND_TO));
     }, PREDICT_MS);
@@ -586,8 +601,8 @@ export default function LivePage() {
           </ul>
           {showNumbers && cost && (
             <p className="mt-3 text-ink-3">
-              a sample costs {cost.total} ms (embed {cost.embed}, name {cost.name}); the detector
-              takes {cost.detect} ms alongside it
+              a sample costs {cost.total} ms (embed {cost.embed}, name {cost.name}); holding the
+              boxes costs {cost.look} ms a frame; the detector takes {cost.detect} ms alongside it
             </p>
           )}
           {facts && facts.unnamedSamples > 0 && (

@@ -2,16 +2,13 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { correlate, print, relock, type Print } from "./lock.ts";
-import { asCanvas, boxAt, canvasOf, emptyScene, SIZE, sceneWith, type Stub } from "./scene.mock.ts";
+import { boxAt, emptyScene, frameOfPaint, SIZE, sceneWith } from "./scene.mock.ts";
 
-const scratch = canvasOf(24, 24, () => 0);
-const printOf = (stub: Stub, rect: ReturnType<typeof boxAt>) =>
-  print(asCanvas(stub), rect, asCanvas(scratch));
-const relockIn = (stub: Stub, template: Print, expected: ReturnType<typeof boxAt>) =>
-  relock(asCanvas(stub), template, expected, asCanvas(scratch));
+const printOf = print;
+const relockIn = relock;
 
 test("a print of a flat region is refused, because it would match anything", () => {
-  assert.equal(printOf(canvasOf(320, 240, () => 128), boxAt(10, 10)), null);
+  assert.equal(printOf(frameOfPaint(() => 128), boxAt(10, 10)), null);
 });
 
 test("a print correlates perfectly with itself", () => {
@@ -61,13 +58,13 @@ test("when the subject is gone there is nothing to lock on to", () => {
 test("noise does not pass as the subject", () => {
   let seed = 1;
   const random = () => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff) * 255;
-  const found = relockIn(canvasOf(320, 240, random), template, boxAt(100, 80));
+  const found = relockIn(frameOfPaint(random), template, boxAt(100, 80));
   assert.ok(!found || found.score < 0.5, `noise scored ${found?.score.toFixed(3)}`);
 });
 
 test("a contrast-inverted subject scores clearly below the real one", () => {
   const real = sceneWith(100, 80);
-  const inverted = canvasOf(320, 240, (px, py) => 255 - real.buffer[py * 320 + px]);
+  const inverted = frameOfPaint((px, py) => 255 - real.pixels[py * real.width + px]);
   const honest = relockIn(real, template, boxAt(100, 80));
   const impostor = relockIn(inverted, template, boxAt(100, 80));
   assert.ok(honest);

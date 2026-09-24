@@ -9,18 +9,14 @@
  * still labelled, still confident. That is the failure this fixes.
  *
  * Each track keeps a small greyscale print of what it was looking at when it
- * was last seen. Every frame, the neighbourhood is resampled once and the print
- * is slid across it to find where that pattern went. Sliding inside one
- * resampled window rather than re-cropping per candidate is what makes an
- * exhaustive search affordable — and it has to be exhaustive, because the
- * correlation peak is only a pixel or two wide and a sparse search walks
- * straight past it.
+ * was last seen, and every frame the neighbourhood is searched for where that
+ * pattern went.
  *
- * What comes back is not only a position. The shape of the response says
- * whether this is the same thing: a true match is a sharp spike on a flat
- * field, while a plausible-looking impostor is a low broad hump. That ratio is
- * the tracker's own confidence, and when it collapses the honest report is
- * that the subject has been lost.
+ * Nothing here touches a canvas. The frame is read back once, into plain
+ * numbers, and every track is matched against that — because a readback is a
+ * stall waiting on the GPU, and doing one per track cost 50ms a frame and
+ * slowed the detector to a crawl. One readback and arithmetic is fifteen times
+ * cheaper, and pure functions over an array are far easier to be sure of.
  */
 
 /** The print's side, in print pixels. Matching cost is independent of box size. */
@@ -34,6 +30,8 @@ const OFFSETS = WINDOW - PRINT + 1;
 /** Sidelobes are measured outside this radius of the peak, in print pixels. */
 const PEAK_RADIUS = 3;
 
+/** A frame's brightness, one number per pixel. */
+export type Frame = { pixels: Float32Array; width: number; height: number };
 export type Print = { pixels: Float32Array; span: number };
 export type Rect = { x1: number; y1: number; x2: number; y2: number };
 export type Lock = { rect: Rect; score: number; sharpness: number };
@@ -43,12 +41,68 @@ const window_ = new Float32Array(WINDOW * WINDOW);
 const sums = new Float64Array((WINDOW + 1) * (WINDOW + 1));
 const squares = new Float64Array((WINDOW + 1) * (WINDOW + 1));
 const surface = new Float32Array(OFFSETS * OFFSETS);
-const blurred = new Float32Array(WINDOW * WINDOW);
+const scratch = new Float32Array(WINDOW * WINDOW);
 
-/** Greyscale a resampled patch into `into`, one row at a time. */
-function grey(data: Uint8ClampedArray, side: number, into: Float32Array) {
-  for (let i = 0; i < side * side; i++) {
-    into[i] = (data[i * 4] * 77 + data[i * 4 + 1] * 150 + data[i * 4 + 2] * 29) / 256;
+/**
+ * Read a canvas once into brightness values.
+ *
+ * This is the only expensive step, and it happens a single time per frame
+ * however many things are being followed.
+ *
+ * Pass the previous frame back as `reuse` to write into its buffer instead of
+ * allocating another: at ten frames a second a fresh buffer per frame is a third
+ * of a megabyte of garbage a second, and the collector's pauses land in the
+ * middle of the video. Only do that where the old frame is genuinely finished
+ * with — a print still being cut from an earlier frame needs its own.
+ */
+export function frameOf(source: HTMLCanvasElement, reuse?: Frame | null): Frame | null {
+  const context = source.getContext("2d", { willReadFrequently: true });
+  if (!context || !source.width || !source.height) return null;
+  const { width, height } = source;
+  const { data } = context.getImageData(0, 0, width, height);
+  const pixels =
+    reuse && reuse.width === width && reuse.height === height
+      ? reuse.pixels
+      : new Float32Array(width * height);
+  for (let i = 0; i < pixels.length; i++) {
+    pixels[i] = (data[i * 4] * 77 + data[i * 4 + 1] * 150 + data[i * 4 + 2] * 29) / 256;
+  }
+  return { pixels, width, height };
+}
+
+/** Brightness between pixels, interpolated and clamped at the frame's edge. */
+function at(frame: Frame, x: number, y: number): number {
+  const { pixels, width, height } = frame;
+  const cx = x < 0 ? 0 : x > width - 1 ? width - 1 : x;
+  const cy = y < 0 ? 0 : y > height - 1 ? height - 1 : y;
+  const x0 = Math.floor(cx);
+  const y0 = Math.floor(cy);
+  const x1 = x0 + 1 < width ? x0 + 1 : x0;
+  const y1 = y0 + 1 < height ? y0 + 1 : y0;
+  const fx = cx - x0;
+  const fy = cy - y0;
+  const top = pixels[y0 * width + x0] * (1 - fx) + pixels[y0 * width + x1] * fx;
+  const bottom = pixels[y1 * width + x0] * (1 - fx) + pixels[y1 * width + x1] * fx;
+  return top * (1 - fy) + bottom * fy;
+}
+
+/** Resample a rectangle of the frame into a square of `side`, into `into`. */
+function resample(
+  frame: Frame,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  side: number,
+  into: Float32Array,
+) {
+  const stepX = w / side;
+  const stepY = h / side;
+  for (let j = 0; j < side; j++) {
+    const sy = y + (j + 0.5) * stepY;
+    for (let i = 0; i < side; i++) {
+      into[j * side + i] = at(frame, x + (i + 0.5) * stepX, sy);
+    }
   }
 }
 
@@ -57,23 +111,23 @@ function grey(data: Uint8ClampedArray, side: number, into: Float32Array) {
  *
  * Without it the response is a single-pixel spike sitting on noise: findable,
  * but with nothing either side of the peak to interpolate against, so the box
- * can only ever land on whole print pixels and visibly steps between them.
- * Blurring widens the peak just enough to fit a curve through.
+ * can only land on whole print pixels and visibly steps between them. Blurring
+ * widens the peak just enough to fit a curve through.
  */
-function smooth(pixels: Float32Array, side: number, scratch: Float32Array) {
+function smooth(pixels: Float32Array, side: number, spare: Float32Array) {
   for (let y = 0; y < side; y++) {
     const row = y * side;
     for (let x = 0; x < side; x++) {
       const l = pixels[row + (x > 0 ? x - 1 : 0)];
       const r = pixels[row + (x < side - 1 ? x + 1 : side - 1)];
-      scratch[row + x] = (l + 2 * pixels[row + x] + r) / 4;
+      spare[row + x] = (l + 2 * pixels[row + x] + r) / 4;
     }
   }
   for (let x = 0; x < side; x++) {
     for (let y = 0; y < side; y++) {
-      const u = scratch[(y > 0 ? y - 1 : 0) * side + x];
-      const d = scratch[(y < side - 1 ? y + 1 : side - 1) * side + x];
-      pixels[y * side + x] = (u + 2 * scratch[y * side + x] + d) / 4;
+      const u = spare[(y > 0 ? y - 1 : 0) * side + x];
+      const d = spare[(y < side - 1 ? y + 1 : side - 1) * side + x];
+      pixels[y * side + x] = (u + 2 * spare[y * side + x] + d) / 4;
     }
   }
 }
@@ -84,24 +138,14 @@ function smooth(pixels: Float32Array, side: number, scratch: Float32Array) {
  * Normalising is what makes the match indifferent to the scene getting brighter
  * or darker: only the pattern survives, not the exposure.
  */
-export function print(
-  source: HTMLCanvasElement,
-  rect: Rect,
-  scratch: HTMLCanvasElement,
-): Print | null {
+export function print(frame: Frame, rect: Rect): Print | null {
   const w = rect.x2 - rect.x1;
   const h = rect.y2 - rect.y1;
   if (w < 4 || h < 4) return null;
 
-  scratch.width = PRINT;
-  scratch.height = PRINT;
-  const context = scratch.getContext("2d", { willReadFrequently: true });
-  if (!context) return null;
-  context.drawImage(source, rect.x1, rect.y1, w, h, 0, 0, PRINT, PRINT);
-
   const pixels = new Float32Array(PRINT * PRINT);
-  grey(context.getImageData(0, 0, PRINT, PRINT).data, PRINT, pixels);
-  smooth(pixels, PRINT, blurred);
+  resample(frame, rect.x1, rect.y1, w, h, PRINT, pixels);
+  smooth(pixels, PRINT, scratch);
 
   let sum = 0;
   for (let i = 0; i < pixels.length; i++) sum += pixels[i];
@@ -135,40 +179,28 @@ function apex(left: number, middle: number, right: number): number {
 /**
  * Find where a print has moved to, searching the whole neighbourhood.
  *
- * The window is resampled once and every offset inside it is scored, which is
- * both cheaper than re-cropping per candidate and the only way to catch a peak
- * this narrow. Sums and sums-of-squares come from integral images, so each
- * offset's normalisation is a handful of lookups and only the cross-product is
- * actually summed.
+ * The window is resampled once and every offset inside it scored, which has to
+ * be exhaustive: the correlation peak is only a pixel or two wide, and a coarse
+ * search walks straight past it. Sums and sums-of-squares come from integral
+ * images, so each offset's normalisation is a handful of lookups and only the
+ * cross-product is actually summed.
+ *
+ * The window is stretched by the same factor in each direction as the print, so
+ * a tall thin subject is matched against pixels squashed exactly as its own
+ * print was.
  */
-export function relock(
-  source: HTMLCanvasElement,
-  template: Print,
-  expected: Rect,
-  scratch: HTMLCanvasElement,
-): Lock | null {
+export function relock(frame: Frame, template: Print, expected: Rect): Lock | null {
   const w = expected.x2 - expected.x1;
   const h = expected.y2 - expected.y1;
   if (w < 4 || h < 4) return null;
 
-  const span = Math.max(w, h);
-  const side = span * (1 + 2 * SEARCH);
-  if (side > source.width || side > source.height) return null;
-
-  // Keep the window whole rather than cropping it at the frame's edge: its size
-  // fixes the scale the print was taken at, and a cropped window would rescale.
-  const centreX = (expected.x1 + expected.x2) / 2;
-  const centreY = (expected.y1 + expected.y2) / 2;
-  const x0 = Math.min(Math.max(centreX - side / 2, 0), source.width - side);
-  const y0 = Math.min(Math.max(centreY - side / 2, 0), source.height - side);
-
-  scratch.width = WINDOW;
-  scratch.height = WINDOW;
-  const context = scratch.getContext("2d", { willReadFrequently: true });
-  if (!context) return null;
-  context.drawImage(source, x0, y0, side, side, 0, 0, WINDOW, WINDOW);
-  grey(context.getImageData(0, 0, WINDOW, WINDOW).data, WINDOW, window_);
-  smooth(window_, WINDOW, blurred);
+  const grown = 1 + 2 * SEARCH;
+  const windowW = w * grown;
+  const windowH = h * grown;
+  const x0 = (expected.x1 + expected.x2) / 2 - windowW / 2;
+  const y0 = (expected.y1 + expected.y2) / 2 - windowH / 2;
+  resample(frame, x0, y0, windowW, windowH, WINDOW, window_);
+  smooth(window_, WINDOW, scratch);
 
   const stride = WINDOW + 1;
   sums.fill(0);
@@ -183,7 +215,7 @@ export function relock(
     }
   }
   const area = PRINT * PRINT;
-  const box = (table: Float64Array, x: number, y: number) =>
+  const block = (table: Float64Array, x: number, y: number) =>
     table[(y + PRINT) * stride + x + PRINT] -
     table[y * stride + x + PRINT] -
     table[(y + PRINT) * stride + x] +
@@ -194,8 +226,8 @@ export function relock(
   let bestY = 0;
   for (let oy = 0; oy < OFFSETS; oy++) {
     for (let ox = 0; ox < OFFSETS; ox++) {
-      const total = box(sums, ox, oy);
-      const variance = box(squares, ox, oy) - (total * total) / area;
+      const total = block(sums, ox, oy);
+      const variance = block(squares, ox, oy) - (total * total) / area;
       let score = 0;
       if (variance > 1e-3) {
         // The print is zero-mean, so the window's own mean drops out of the
@@ -237,19 +269,17 @@ export function relock(
   }
   const mean = count ? sum / count : 0;
   const spread = count ? Math.sqrt(Math.max(squareSum / count - mean * mean, 1e-12)) : 1;
-  const sharpness = (bestScore - mean) / spread;
 
-  const at = (ox: number, oy: number) =>
+  const scoreAt = (ox: number, oy: number) =>
     ox < 0 || oy < 0 || ox >= OFFSETS || oy >= OFFSETS ? -1 : surface[oy * OFFSETS + ox];
-  const shiftX = apex(at(bestX - 1, bestY), bestScore, at(bestX + 1, bestY));
-  const shiftY = apex(at(bestX, bestY - 1), bestScore, at(bestX, bestY + 1));
+  const shiftX = apex(scoreAt(bestX - 1, bestY), bestScore, scoreAt(bestX + 1, bestY));
+  const shiftY = apex(scoreAt(bestX, bestY - 1), bestScore, scoreAt(bestX, bestY + 1));
 
-  const scale = side / WINDOW;
-  const x1 = x0 + (bestX + shiftX) * scale;
-  const y1 = y0 + (bestY + shiftY) * scale;
+  const x1 = x0 + (bestX + shiftX) * (windowW / WINDOW);
+  const y1 = y0 + (bestY + shiftY) * (windowH / WINDOW);
   return {
     rect: { x1, y1, x2: x1 + w, y2: y1 + h },
     score: bestScore,
-    sharpness,
+    sharpness: (bestScore - mean) / spread,
   };
 }

@@ -10,7 +10,7 @@
  * halfway across the frame has failed at the one job detection cannot do.
  */
 import { Tracker, iou } from "../src/lib/track.ts";
-import { asCanvas, canvasOf } from "../src/lib/scene.mock.ts";
+import { frameOfPaint } from "../src/lib/scene.mock.ts";
 
 const FRAME = { w: 640, h: 480 };
 const STEP_MS = 300;
@@ -39,7 +39,7 @@ function texture(id, u, v) {
 
 /** The frame a viewer would see: whatever is actually in shot, on a plain field. */
 function render(visible) {
-  return canvasOf(FRAME.w, FRAME.h, (x, y) => {
+  return frameOfPaint((x, y) => {
     for (const t of visible) {
       const w = t.box.x2 - t.box.x1;
       const h = t.box.y2 - t.box.y1;
@@ -49,7 +49,7 @@ function render(visible) {
       return texture(t.id, u, v);
     }
     return 90;
-  });
+  }, FRAME.w, FRAME.h);
 }
 
 /** Deterministic jitter, so a run is reproducible. */
@@ -125,6 +125,29 @@ const SCENARIOS = {
    */
   "crossing behind an occlusion": () => crossingWithGap(),
 
+  /**
+   * One subject, approaching, while the detector speaks every third frame.
+   *
+   * This is the ordinary case on real footage and the one that churns identity:
+   * a thing coming closer grows, so by the time the detector next finds it its
+   * box is a different size from the one being carried forward. If association
+   * demands too much overlap the sighting is taken for a new object, and what a
+   * viewer sees is a subject that keeps being freshly discovered.
+   */
+  "coming closer while the detector lags": () => {
+    const frames = [];
+    for (let i = 0; i < 24; i++) {
+      const size = 40 + i * 6;
+      const truth = [{ id: "A", label: "dog", box: box(300 - size / 2, 240 - size / 2, size, size) }];
+      frames.push({
+        truth,
+        visible: truth,
+        seen: i % 3 === 0 ? truth.map((t) => ({ ...t, score: 0.9 })) : [],
+      });
+    }
+    return frames;
+  },
+
 };
 
 function crossingWithGap() {
@@ -177,20 +200,30 @@ function assign(tracks, truths, gate = 0.3) {
   return { matched, usedTracks };
 }
 
+/**
+ * Overlap at which two ground-truth objects stop being tellable apart.
+ *
+ * Where two subjects occupy the same pixels there is no fact of the matter about
+ * which box belongs to which: a one-to-one assignment picks one pairing, the next
+ * frame picks the other, and the difference is recorded as two identity switches
+ * the tracker never made. That is not leniency — the frames either side are still
+ * scored, so a tracker that genuinely swaps two subjects is caught the moment
+ * they separate, which is the only place the swap is visible.
+ */
+const AMBIGUOUS = 0.5;
+
 function run(name, frames, { lock } = { lock: true }) {
   const tracker = new Tracker(FRAME.w * FRAME.h);
-  const scratch = asCanvas(canvasOf(24, 24, () => 0));
   const assigned = new Map(); // ground-truth id -> track id it was last matched to
   let switches = 0;
   let covered = 0;
   let total = 0;
   let ghosts = 0;
+  const born = new Set();
 
   frames.forEach((frame, i) => {
     const now = i * STEP_MS;
-    const sight = lock
-      ? { source: asCanvas(render(frame.visible ?? frame.truth)), scratch }
-      : undefined;
+    const sight = lock ? render(frame.visible ?? frame.truth) : undefined;
     tracker.update(
       frame.seen.map((s) => ({ label: s.label, score: s.score, box: s.box })),
       now,
@@ -208,6 +241,8 @@ function run(name, frames, { lock } = { lock: true }) {
       const match = matched.get(ti);
       if (!match) return;
       covered += 1;
+      const twinned = frame.truth.some((o, oi) => oi !== ti && iou(o.box, truth.box) > AMBIGUOUS);
+      if (twinned) return; // nothing to conclude, and the last assignment stands
       const previous = assigned.get(truth.id);
       if (previous !== undefined && previous !== match.id) switches += 1;
       assigned.set(truth.id, match.id);
@@ -215,6 +250,7 @@ function run(name, frames, { lock } = { lock: true }) {
 
     // Tracks matching nothing real are inventions.
     ghosts += tracks.filter((_, ki) => !usedTracks.has(ki)).length;
+    tracks.forEach((t) => born.add(t.id));
   });
 
   return {
@@ -222,6 +258,10 @@ function run(name, frames, { lock } = { lock: true }) {
     switches,
     coverage: covered / total,
     ghostFrames: ghosts,
+    // One identity per real object is the ideal; more means the tracker keeps
+    // rediscovering the same thing.
+    births: born.size,
+    objects: new Set(frames.flatMap((f) => f.truth.map((t) => t.id))).size,
   };
 }
 
@@ -235,6 +275,7 @@ const THRESHOLDS = {
   // Velocity carries each track through the gap on its own side, so identity
   // survives without appearance features.
   "crossing behind an occlusion": { switches: 0, coverage: 0.5, ghostFrames: 4 },
+  "coming closer while the detector lags": { switches: 0, coverage: 0.7, ghostFrames: 2, births: 1 },
 };
 
 export function evaluateTracker() {
@@ -252,18 +293,22 @@ export function evaluateTracker() {
     const ok =
       r.switches <= limit.switches &&
       r.coverage >= limit.coverage &&
-      r.ghostFrames <= limit.ghostFrames;
+      r.ghostFrames <= limit.ghostFrames &&
+      r.births <= (limit.births ?? Infinity);
     if (!ok) failures += 1;
     console.log(
       `  ${ok ? "pass" : "FAIL"}  ${r.name.padEnd(46)} ` +
         `id switches ${r.switches} (max ${limit.switches}), ` +
         `covered ${(r.coverage * 100).toFixed(0)}% (min ${limit.coverage * 100}%), ` +
-        `phantom boxes ${r.ghostFrames} (max ${limit.ghostFrames})`,
+        `phantom boxes ${r.ghostFrames} (max ${limit.ghostFrames})` +
+        (limit.births === undefined
+          ? ""
+          : `, identities ${r.births} for ${r.objects} object${r.objects === 1 ? "" : "s"} (max ${limit.births})`),
     );
     const gained = r.coverage - r.blind.coverage;
     console.log(
       `        without the visual lock: covered ${(r.blind.coverage * 100).toFixed(0)}%, ` +
-        `id switches ${r.blind.switches}` +
+        `id switches ${r.blind.switches}, identities ${r.blind.births}` +
         (Math.abs(gained) < 0.005
           ? " — the lock makes no difference here"
           : ` — the lock ${gained > 0 ? "adds" : "costs"} ${Math.abs(gained * 100).toFixed(0)} points of coverage`),

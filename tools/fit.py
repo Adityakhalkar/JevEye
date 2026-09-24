@@ -11,7 +11,7 @@ Two separate jobs, deliberately kept apart:
 Both are measured against zero-shot on the same test images, because a number
 without a baseline is not evidence.
 
-Usage: python3 tools/fit.py <workdir> [outdir]
+Usage: python3 tools/fit.py <workdir> [outdir] [--name flowers]
 """
 import json
 import os
@@ -22,6 +22,7 @@ from scipy.optimize import minimize_scalar
 from sklearn.linear_model import LogisticRegression
 
 work = sys.argv[1]
+name = sys.argv[sys.argv.index("--name") + 1] if "--name" in sys.argv else "flowers"
 E = lambda name: np.fromfile(f"{work}/{name}.bin", dtype=np.float32).reshape(-1, 512)
 meta = json.load(open(f"{work}/meta.json"))
 
@@ -29,7 +30,7 @@ train_x, calib_x, test_x = E("train"), E("calib"), E("test")
 train_y = np.array(meta["train_labels"])
 calib_y = np.array(meta["calib_labels"])
 test_y = np.array(meta["test_labels"])
-text = E("text")  # 102 x 512, the zero-shot classifier
+text = E("text")  # classes x 512, the zero-shot classifier
 
 CLIP_LOGIT_SCALE = 100.0
 
@@ -99,10 +100,10 @@ report["test_images"] = int(len(test_y))
 report["calibration_images"] = int(len(calib_y))
 
 # ---- ship it: weights, bias and the fitted temperature the browser will load
-out = sys.argv[2] if len(sys.argv) > 2 else f"{work}/out"
+out = sys.argv[2] if len(sys.argv) > 2 and not sys.argv[2].startswith("--") else f"{work}/out"
 os.makedirs(out, exist_ok=True)
-W.tofile(f"{out}/flowers.w.bin")   # [classes, 512] row-major float32
-b.tofile(f"{out}/flowers.b.bin")   # [classes] float32
+W.tofile(f"{out}/{name}.w.bin")   # [classes, 512] row-major float32
+b.tofile(f"{out}/{name}.b.bin")   # [classes] float32
 json.dump(
     {
         "classes": int(W.shape[0]),
@@ -110,10 +111,11 @@ json.dump(
         "temperature": report["probe"]["temperature"],
         "accuracy": report["probe"]["accuracy"],
         "ece": report["probe"]["ece_calibrated"],
-        "trained_on": "Oxford Flowers-102 train+val, CLIP ViT-B/32 q8 embeddings",
+        "trained_on": meta.get("trained_on", f"{name}, CLIP ViT-B/32 q8 embeddings"),
+        "train_images": int(len(train_y)),
         "zero_shot_baseline": report["zero_shot"]["accuracy"],
     },
-    open(f"{out}/flowers.json", "w"),
+    open(f"{out}/{name}.json", "w"),
     indent=2,
 )
 json.dump(report, open(f"{work}/report.json", "w"), indent=2)

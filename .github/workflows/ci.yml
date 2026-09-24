@@ -1,0 +1,52 @@
+# What a change has to survive before it is believed.
+#
+# The offline evaluations run on every push: they need no API key and no
+# dataset, because they measure logic and the artifacts already committed. The
+# planner evaluation calls the real Jev API, so it runs only where a key exists
+# — on pushes to main, and on demand.
+name: check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npx eslint src evals
+      - run: npm test
+      - run: npm run build
+      # Quality, not correctness: a failure here means something got worse.
+      - run: npm run eval:offline
+
+  planner:
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Ask Jev the fixed question set
+        env:
+          TYPESAFE_API_KEY: ${{ secrets.TYPESAFE_API_KEY }}
+        run: |
+          if [ -z "$TYPESAFE_API_KEY" ]; then
+            echo "No API key configured; skipping the planner evaluation."
+            exit 0
+          fi
+          npx next start --port 3117 & sleep 8
+          node --experimental-strip-types evals/planner.mjs

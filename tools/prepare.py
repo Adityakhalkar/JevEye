@@ -6,7 +6,12 @@ test set into two disjoint halves: one to fit the temperature, one to report on.
 The temperature never sees the images it is judged on, or the honesty number
 would be self-graded.
 
-Usage: python3 tools/prepare.py <workdir>
+Pass --all to fold the dataset's unused remainder into the training set. The
+calibration and test splits are drawn with a fixed seed either way, so the two
+training sizes are scored on exactly the same held-out images and the
+comparison means something.
+
+Usage: python3 tools/prepare.py <workdir> [--all]
 """
 import json
 import sys
@@ -30,6 +35,13 @@ rest = sets["tstid"][0].copy()
 np.random.default_rng(SEED).shuffle(rest)
 calib_ids, test_ids = rest[:CALIB_N], rest[CALIB_N : CALIB_N + TEST_N]
 
+# Flowers-102's own protocol trains on 10 images per class and leaves most of
+# the set for testing. That suits a benchmark; it wastes data for a probe that
+# has to work. Everything not spoken for by calibration or test can be trained on.
+spare = rest[CALIB_N + TEST_N :]
+if "--all" in sys.argv:
+    train_ids = np.concatenate([train_ids, spare])
+
 for name, ids in [("train", train_ids), ("calib", calib_ids), ("test", test_ids)]:
     json.dump({"files": [path(int(i)) for i in ids]}, open(f"{work}/{name}.json", "w"))
 
@@ -43,5 +55,5 @@ json.dump(
     open(f"{work}/meta.json", "w"),
 )
 
-print(f"train {len(train_ids)}  calib {len(calib_ids)}  test {len(test_ids)}")
+print(f"train {len(train_ids)}  calib {len(calib_ids)}  test {len(test_ids)}  unused {0 if '--all' in sys.argv else len(spare)}")
 print(f"total images to embed: {len(train_ids) + len(calib_ids) + len(test_ids)}")

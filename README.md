@@ -210,15 +210,30 @@ Measured on 1,500 test images that neither the probe nor the temperature ever sa
 
 | | zero-shot | trained probe |
 |---|---|---|
-| **Accuracy** | 29.1% | **92.8%** |
-| **ECE, raw** | 0.093 | 0.459 |
-| **ECE, calibrated** | 0.041 | **0.014** |
+| **Accuracy** | 31.2% | **96.9%** |
+| **ECE, calibrated** | 0.068 | **0.020** |
 
 Chance is 1.0%. The full report is in [`docs/probe-report.json`](docs/probe-report.json).
 
+### How much data it wanted
+
+The first probe was fitted on 2,040 images — Flowers-102's own protocol, ten per class — and scored 92.8%. Asked whether that was enough, I reasoned it was within about three points of the backbone's ceiling and that more data would not be worth the effort. That was an assertion, so `tools/curve.py` measured it: the same probe fitted on growing stratified fractions, every one scored on the same held-out images.
+
+| training images | per class | accuracy | ECE |
+|---|---|---|---|
+| 553 | 5 | 81.0% | 0.025 |
+| 1,368 | 13 | 91.1% | 0.019 |
+| 2,744 | 27 | 94.5% | 0.015 |
+| 4,121 | 40 | 96.4% | 0.018 |
+| **5,489** | **54** | **96.9%** | 0.020 |
+
+The estimate was the right size and the wrong conclusion. Going from the shipped 2,040 to all 5,489 is +4.1 points, which sounds small and is not: the error rate falls from 7.2% to 3.1%, less than half. The last 25% of the data moved accuracy by 0.5%, so the curve really is flattening — but it flattens *after* the point this project had stopped at, not before.
+
+The shipped probe is now fitted on all 5,489. Calibration is marginally worse for it (0.014 to 0.020, against a 0.05 floor), which is the honest cost of the trade.
+
 Three things worth saying plainly about those numbers:
 
-- **Zero-shot at 29% is well below the ~66% the CLIP paper reports** for this dataset. The gap is ours, not theirs: q8 quantization costs accuracy, and the paper ensembles 80 prompt templates where JevEye uses one. It is the honest baseline *for this build*, which is what the probe had to beat.
+- **Zero-shot at 31% is well below the ~66% the CLIP paper reports** for this dataset. The gap is ours, not theirs: q8 quantization costs accuracy, and the paper ensembles 80 prompt templates where JevEye uses six. Ensembling those six lifted it from 29.1% to 31.2%, which is the measured value of that change.
 - **The raw probe is badly calibrated in the opposite direction** — ECE 0.459 while being right 92.8% of the time, i.e. far too *timid*. The fitted temperature of 0.35 sharpens it. Calibration is not only about reining models in.
 - **On the demo photograph the difference is visible**, and not just as a bigger number. Zero-shot found corn poppy in 3 tiles at mean 0.32 alongside junk labels — ball moss, silverbush — and could not name 8 of 14 tiles. The probe finds corn poppy in 5 tiles at mean 1.00 and correctly names the white flowers *oxeye daisy*, the nearest species in the vocabulary to the scentless mayweed actually present. Jev's mixed-picture probability rises from 0.71 to 0.89, because for the first time the second species is actually in the evidence.
 

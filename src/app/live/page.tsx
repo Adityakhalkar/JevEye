@@ -19,7 +19,7 @@ import {
   type Choice,
   type LoadProgress,
 } from "@/lib/vision";
-import { VOCABULARIES } from "@/lib/vocab";
+import { VOCABULARIES, type VocabularyId } from "@/lib/vocab";
 
 /** Sampling rate. Embedding costs ~15ms, so this leaves the tab responsive. */
 const SAMPLE_MS = 300;
@@ -74,6 +74,9 @@ export default function LivePage() {
   const [found, setFound] = useState<{ boxes: Found[]; size: { width: number; height: number } } | null>(null);
   const [showBoxes, setShowBoxes] = useState(true);
   const [showNumbers, setShowNumbers] = useState(false);
+  /** Which catalogue Jev says the watcher means; objects until told otherwise. */
+  const [vocabulary, setVocabulary] = useState<VocabularyId>("objects");
+  const vocabularyRef = useRef<VocabularyId>("objects");
   const [entries, setEntries] = useState<Entry[]>([]);
   const [watching, setWatching] = useState("");
   const [spend, setSpend] = useState(0);
@@ -86,6 +89,38 @@ export default function LivePage() {
   const watchingRef = useRef(watching);
   useEffect(() => {
     watchingRef.current = watching;
+  }, [watching]);
+
+  useEffect(() => {
+    vocabularyRef.current = vocabulary;
+  }, [vocabulary]);
+
+  /**
+   * Ask Jev what the watcher means, once the typing stops.
+   *
+   * Debounced rather than per keystroke: this is a paid call, and "dog" on the
+   * way to "dogwood flowers" is a different catalogue entirely.
+   */
+  useEffect(() => {
+    const text = watching.trim();
+    const timer = setTimeout(async () => {
+      if (text === "") {
+        setVocabulary("objects");
+        return;
+      }
+      try {
+        const response = await fetch("/api/vocabulary", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ watching: text }),
+        });
+        const json = await response.json();
+        if (response.ok && json.vocabulary) setVocabulary(json.vocabulary);
+      } catch {
+        // Keeping the current catalogue is the right failure: the feed carries on.
+      }
+    }, 900);
+    return () => clearTimeout(timer);
   }, [watching]);
 
   const judge = useCallback(async (live: LiveFacts, reason: string) => {
@@ -167,7 +202,7 @@ export default function LivePage() {
           probabilities: ranked,
         };
       } else {
-        [named] = await classify([embed], VOCABULARIES.objects);
+        [named] = await classify([embed], VOCABULARIES[vocabularyRef.current]);
       }
       lastNaming.current = named;
     }
@@ -371,7 +406,12 @@ export default function LivePage() {
         </figure>
 
         <section className="rounded-lg border border-rule bg-panel p-4">
-          <h2 className="mb-3 text-ink-2">Following</h2>
+          <h2 className="mb-3 flex items-baseline justify-between text-ink-2">
+            Following
+            <span className="text-ink-3">
+              naming from {VOCABULARIES[vocabulary].labels.length} {vocabulary}
+            </span>
+          </h2>
           {tracks.length === 0 && <p className="text-ink-3">Nothing being followed yet.</p>}
           <ul className="space-y-3">
             {tracks.slice(0, 5).map((t) => (

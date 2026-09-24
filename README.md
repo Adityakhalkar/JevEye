@@ -299,11 +299,27 @@ enough to substitute. The probes are fitted on the teacher's exact geometry;
 vectors sitting 0.18 away take the calibration, the thresholds and the cached
 text embeddings with them.
 
-**So it is not shipped, and the conclusion generalises.** Apple's MobileCLIP-S0
-is an 11.2 MB vision tower distilled on billions of pairs, free, and already in
-ONNX. The gap between it and this is four orders of magnitude of data, not
-compute — no affordable GPU budget closes it. Swapping to MobileCLIP is the way
-to get a small vision tower; training one is not.
+**So it is not shipped**, and Apple's MobileCLIP-S0 — an 11.2 MB tower distilled
+on billions of pairs, free and already in ONNX — is the way to get a small vision
+tower rather than training one.
+
+Except that it is not, and this took a benchmark to learn. Loaded through the
+same runtime, on the same images, after warm-up:
+
+| | download | throughput |
+|---|---|---|
+| CLIP ViT-B/32 q8 | 84.9 MB | **93 images/s** |
+| MobileCLIP-S0 q8 | **11.2 MB** | 16 images/s |
+
+**7.6× smaller and 5.8× slower.** MobileCLIP is a hybrid convolutional design
+built for mobile NPUs; ONNX Runtime on a CPU serves its many small depthwise
+operations badly, while ViT-B/32 is a dozen large matmuls, which is exactly what
+that runtime does well. Smaller weights are a download win, not a speed win, and
+the live view is gated by throughput rather than by megabytes.
+
+Measured on CPU through Node. A browser on WebGPU could rank them differently,
+since that is the hardware MobileCLIP was designed for — but the WASM fallback
+will behave like this, and that is the path every visitor without WebGPU takes.
 
 ### Which lever is stuck
 

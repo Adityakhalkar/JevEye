@@ -119,6 +119,17 @@ export type Detection = {
   area: number;
 };
 
+/**
+ * Shortest input edge for the detector, which dominates its cost.
+ *
+ * DETR's own config asks for 800 and upscales anything smaller to reach it.
+ * Measured on one photograph, median of three after warm-up: 800px takes
+ * 6561ms, 480px 1200ms, 400px 660ms — ten times faster — and all of them find
+ * the same dog. A live view cannot afford 800; a still can afford more care.
+ */
+export const DETECT_EDGE_LIVE = 400;
+export const DETECT_EDGE_STILL = 560;
+
 export async function loadDetector(onProgress?: (p: LoadProgress) => void): Promise<Detector> {
   detectorLoading ??= pipeline("object-detection", DETECTOR, {
     dtype: DTYPE,
@@ -142,8 +153,18 @@ export async function loadDetector(onProgress?: (p: LoadProgress) => void): Prom
 export async function detectObjects(
   image: RawImage,
   threshold = 0.5,
+  shortestEdge = DETECT_EDGE_STILL,
 ): Promise<Detection[]> {
   const detect = await loadDetector();
+  const pipe = detect as unknown as {
+    processor?: { image_processor?: { size?: { shortest_edge: number; longest_edge: number } } };
+  };
+  if (pipe.processor?.image_processor) {
+    pipe.processor.image_processor.size = {
+      shortest_edge: shortestEdge,
+      longest_edge: Math.round(shortestEdge * 1.67),
+    };
+  }
   const found = await detect(image, { threshold, percentage: false });
   const frame = image.width * image.height;
   return found

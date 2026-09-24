@@ -179,7 +179,28 @@ It changes three answers:
 
 Counting is real again, too. `count` asks the detector for instances and runs the Poisson-binomial over its per-box confidences, so "how many dogs" returns a number and an interval rather than a count of tiles. When the subject is outside its 80 categories the tile coverage is still reported — and the answer says which of the two it is, because they are different claims.
 
-In the live view the detector runs every fourth sample rather than every one: embedding a frame costs ~15 ms and detection closer to a second, so drift is measured continuously while naming reuses its last answer in between. What is in shot changes far more slowly than the view does.
+### Tracking
+
+A detector answers "what is in this frame" and nothing else. Run it twice and you get two unrelated lists, which is why boxes jump: nothing claims that this dog is the same dog as a moment ago. `src/lib/track.ts` adds that claim, by the standard method — associate by overlap, carry a velocity, predict between observations, retire what stops being seen. No Kalman filter; a constant-velocity estimate with exponential smoothing behaves almost the same at these rates and is far easier to reason about when a result looks wrong.
+
+That buys three things a per-frame detector cannot give:
+
+- **Identity.** `dog #379` stays `dog #379` across frames, so "how long has this been here" has an answer.
+- **Motion between passes.** Boxes are redrawn every 60 ms along each track's own velocity, so a subject is followed rather than teleported once a second.
+- **Direction and depth.** A box whose area is growing is approaching, whatever its centre does. "coming closer" is measured, not guessed.
+
+Detection resolution turned out to dominate cost. DETR's config asks for an 800px shortest edge and upscales anything smaller to reach it; measured on one photograph, median of three after warm-up:
+
+| shortest edge | median | detections |
+|---|---|---|
+| 800 px | 6561 ms | 1 |
+| 560 px | 1885 ms | 1 |
+| 480 px | 1200 ms | 1 |
+| **400 px** | **660 ms** | 1 |
+
+Ten times faster, same dog. Live runs at 400, stills at 560 where a little more care costs nothing.
+
+In the live view the detector runs every second sample rather than every one: embedding a frame costs ~15 ms and detection closer to a second, so drift is measured continuously while naming reuses its last answer in between. What is in shot changes far more slowly than the view does.
 
 ## The trained probe
 

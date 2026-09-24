@@ -7,7 +7,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Boxes, Toggle } from "@/components/Boxes";
 import { CHANGE_THRESHOLD, LiveWindow, toSample, type LiveFacts } from "@/lib/live";
 import type { Found } from "@/lib/types";
+import { Tracker, heading, type Track } from "@/lib/track";
 import {
+  DETECT_EDGE_LIVE,
   classify,
   detectObjects,
   embedImages,
@@ -32,7 +34,9 @@ const TRACE_POINTS = 190;
  * depends on it; naming is slower and reuses its last answer in between, which
  * is fine because what is in shot changes far more slowly than the view does.
  */
-const DETECT_EVERY = 4;
+const DETECT_EVERY = 2;
+/** Boxes are redrawn this often, carried along their own velocity in between. */
+const PREDICT_MS = 60;
 
 type Judgment = {
   situation: string;
@@ -57,6 +61,8 @@ export default function LivePage() {
   const inFlight = useRef(false);
   const ticks = useRef(0);
   const lastNaming = useRef<Choice | null>(null);
+  const tracker = useRef(new Tracker());
+  const [tracks, setTracks] = useState<Track[]>([]);
 
   const [status, setStatus] = useState<"idle" | "loading" | "running">("idle");
   const [download, setDownload] = useState<LoadProgress | null>(null);
@@ -140,11 +146,13 @@ export default function LivePage() {
     if (ticks.current % DETECT_EVERY === 0 || !named) {
       // Stricter than the still path: a moving wide shot throws up a lot of
       // true but irrelevant background, and the overlay has to stay readable.
-      const detections = await detectObjects(frame, 0.7);
-      setFound({
-        boxes: detections.map(({ label, score, area, box }) => ({ label, score, area, box })),
-        size: { width: surface.width, height: surface.height },
-      });
+      const detections = await detectObjects(frame, 0.7, DETECT_EDGE_LIVE);
+      tracker.current.setFrameArea(surface.width * surface.height);
+      tracker.current.update(
+        detections.map(({ label, score, box }) => ({ label, score, box })),
+        Date.now(),
+      );
+      setFound({ boxes: [], size: { width: surface.width, height: surface.height } });
       if (detections.length > 0) {
         const ranked = detections
           .slice()
@@ -184,6 +192,19 @@ export default function LivePage() {
       void judge(live, reason);
     }
   }, [judge]);
+
+  /**
+   * Boxes move between detection passes.
+   *
+   * The detector speaks a couple of times a second; the eye notices far finer
+   * steps than that. Carrying each track along its own velocity in between is
+   * what turns a sequence of jumps into something that follows the subject.
+   */
+  useEffect(() => {
+    if (status !== "running") return;
+    const id = setInterval(() => setTracks(tracker.current.predict(Date.now())), PREDICT_MS);
+    return () => clearInterval(id);
+  }, [status]);
 
   useEffect(() => {
     if (status !== "running") return;
@@ -227,6 +248,8 @@ export default function LivePage() {
     window_.current = new LiveWindow();
     ticks.current = 0;
     lastNaming.current = null;
+    tracker.current.reset();
+    setTracks([]);
     setFound(null);
     setTrace([]);
     setEntries([]);
@@ -312,8 +335,16 @@ export default function LivePage() {
         >
           <span className="relative block">
             <video ref={video} playsInline muted className="block w-full" />
-            {showBoxes && found && found.boxes.length > 0 && status === "running" && (
-              <Boxes found={found.boxes} size={found.size} />
+            {showBoxes && found && tracks.length > 0 && status === "running" && (
+              <Boxes
+                found={tracks.map((t) => ({
+                  label: `${t.label} #${t.id}`,
+                  score: t.score,
+                  area: t.area,
+                  box: t.box,
+                }))}
+                size={found.size}
+              />
             )}
           </span>
           <canvas ref={canvas} className="hidden" />
@@ -340,26 +371,20 @@ export default function LivePage() {
         </figure>
 
         <section className="rounded-lg border border-rule bg-panel p-4">
-          <h2 className="mb-3 text-ink-2">In view</h2>
-          {!facts?.subjects.length && (
-            <p className="text-ink-3">Nothing named yet.</p>
-          )}
+          <h2 className="mb-3 text-ink-2">Following</h2>
+          {tracks.length === 0 && <p className="text-ink-3">Nothing being followed yet.</p>}
           <ul className="space-y-3">
-            {facts?.subjects.slice(0, 5).map((s) => (
-              <li key={s.label}>
+            {tracks.slice(0, 5).map((t) => (
+              <li key={t.id}>
                 <div className="flex items-baseline justify-between gap-3">
-                  <span className="truncate text-ink">{s.label}</span>
+                  <span className="truncate text-ink">
+                    {t.label} <span className="text-ink-3">#{t.id}</span>
+                  </span>
                   <span className="shrink-0 tabular-nums text-ink-3">
-                    {Math.round(s.seenFraction * 100)}%
-                    <Trend trend={s.trend} />
+                    {((Date.now() - t.firstSeen) / 1000).toFixed(0)}s
                   </span>
                 </div>
-                <div className="mt-1.5 h-1.5 rounded-sm bg-rule">
-                  <div
-                    className="h-full rounded-sm bg-trace"
-                    style={{ width: `${Math.max(s.seenFraction * 100, 2)}%` }}
-                  />
-                </div>
+                <p className="text-ink-3">{heading(t)}</p>
               </li>
             ))}
           </ul>
@@ -478,17 +503,6 @@ export default function LivePage() {
         </Link>
       </footer>
     </main>
-  );
-}
-
-/** Direction over the window, as a glyph plus a word for anyone who cannot see it. */
-function Trend({ trend }: { trend: "rising" | "falling" | "steady" }) {
-  const glyph = trend === "rising" ? "↗" : trend === "falling" ? "↘" : "→";
-  return (
-    <span className="ml-1.5 text-ink-2" title={trend}>
-      {glyph}
-      <span className="sr-only"> {trend}</span>
-    </span>
   );
 }
 

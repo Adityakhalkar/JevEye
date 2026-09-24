@@ -274,6 +274,42 @@ python3 tools/fit.py <workdir> public/probes       # probe + temperature + the r
 
 The embedder deliberately uses the same checkpoint and quantization as the browser: a probe fitted on fp32 embeddings and served against q8 ones is a train/serve skew you cannot see and cannot debug.
 
+## Distilling CLIP: an experiment that says don't
+
+The vision tower is 84.9 MB of OpenAI's weights and runs on every frame, so a
+smaller stand-in is worth wanting. `tools/distil.py` trains one: a 2.0M-parameter
+convolutional student taught to land in CLIP's *own* embedding space rather than
+to classify, so that if it worked, both probes and every cached text embedding
+would keep working untouched. No labels are involved anywhere — the teacher
+supplies every target, which is what makes unlabelled images useful.
+
+Trained on 13,796 images from COCO and HuggingFace shards, measured on the 10% it
+never saw:
+
+| | |
+|---|---|
+| student against teacher | **2.0M parameters vs 87.8M — 43× smaller** |
+| agreement (cosine) | **0.825** mean, 0.832 median |
+| worst tenth | 0.747 |
+| two *unrelated* images, for scale | 0.454 |
+
+That last row is what makes the others readable. The floor is 0.45 and a perfect
+copy is 1.0, so the student learned a great deal and is still nowhere near close
+enough to substitute. The probes are fitted on the teacher's exact geometry;
+vectors sitting 0.18 away take the calibration, the thresholds and the cached
+text embeddings with them.
+
+**So it is not shipped, and the conclusion generalises.** Apple's MobileCLIP-S0
+is an 11.2 MB vision tower distilled on billions of pairs, free, and already in
+ONNX. The gap between it and this is four orders of magnitude of data, not
+compute — no affordable GPU budget closes it. Swapping to MobileCLIP is the way
+to get a small vision tower; training one is not.
+
+The experiment is kept rather than deleted because "we tried and measured it" is
+worth more than "we assumed it wouldn't work", and because the number tells you
+*which* lever is stuck: with agreement still far from 1.0 at 14k images, the
+limit is data volume rather than student capacity.
+
 ## Evaluations
 
 ```bash

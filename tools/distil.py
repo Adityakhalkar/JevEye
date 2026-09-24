@@ -22,6 +22,15 @@ import sys
 import time
 from pathlib import Path
 
+# The backbone's ImageNet weights are fetched from download.pytorch.org on
+# first use. That download timing out kills a run before epoch one, so cache it
+# before training rather than discovering it twenty minutes in:
+#   curl -sL https://download.pytorch.org/models/mobilenet_v3_small-047dcff4.pth \
+#     -o ~/.cache/torch/hub/checkpoints/mobilenet_v3_small-047dcff4.pth
+#
+# ONNX export additionally needs `onnxscript`; it runs after the checkpoint is
+# written, so a missing dependency costs the export but never the training.
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -116,8 +125,14 @@ student = Student().to(device)
 params = sum(p.numel() for p in student.parameters())
 print(f"student: {params / 1e6:.1f}M parameters against the teacher's 87.8M")
 
-train_loader = DataLoader(Pairs(splits["train"], True), batch_size=64, shuffle=True, num_workers=4)
-val_loader = DataLoader(Pairs(splits["val"], False), batch_size=64, num_workers=4)
+# Loading in this process by default: forked workers die on macOS under Python
+# 3.14, and a crash halfway through an epoch costs more than the throughput they
+# buy. --workers N turns them back on where the platform tolerates it.
+workers = int(sys.argv[sys.argv.index("--workers") + 1]) if "--workers" in sys.argv else 0
+train_loader = DataLoader(
+    Pairs(splits["train"], True), batch_size=64, shuffle=True, num_workers=workers
+)
+val_loader = DataLoader(Pairs(splits["val"], False), batch_size=64, num_workers=workers)
 optimiser = torch.optim.AdamW(student.parameters(), lr=3e-4, weight_decay=1e-4)
 schedule = torch.optim.lr_scheduler.OneCycleLR(
     optimiser, max_lr=1e-3, total_steps=epochs * len(train_loader)

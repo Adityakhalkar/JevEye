@@ -66,6 +66,36 @@ type Point = { at: number; change: number; asked: boolean };
 
 const ATTENTION_LEVELS = ["nothing here", "worth noticing", "look now"];
 
+/** A canvas held in a ref, made on first use so nothing is built during render. */
+function offscreen(ref: { current: HTMLCanvasElement | null }): HTMLCanvasElement {
+  ref.current ??= document.createElement("canvas");
+  return ref.current;
+}
+
+/**
+ * A private copy of a frame, at the size the tracker measures boxes in.
+ *
+ * Both the print taken at identification and the frame searched afterwards have
+ * to be in the same pixel coordinates as the boxes, and neither can share the
+ * sampling canvas: that one is redrawn every sample, so a detection still in
+ * flight would have its print cut from a later frame than the one it saw.
+ */
+function copyOf(
+  ref: { current: HTMLCanvasElement | null },
+  sized: HTMLCanvasElement,
+  from: CanvasImageSource = sized,
+): HTMLCanvasElement | null {
+  const target = offscreen(ref);
+  if (target.width !== sized.width || target.height !== sized.height) {
+    target.width = sized.width;
+    target.height = sized.height;
+  }
+  const context = target.getContext("2d");
+  if (!context) return null;
+  context.drawImage(from, 0, 0, target.width, target.height);
+  return target;
+}
+
 export default function LivePage() {
   const video = useRef<HTMLVideoElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
@@ -82,6 +112,17 @@ export default function LivePage() {
   /** How long the last detection took, measured off the sampling loop. */
   const lastDetectMs = useRef(0);
   const tracker = useRef(new Tracker());
+  /**
+   * Copies of frames, kept off screen.
+   *
+   * A track's print has to be cut from the frame the detector actually saw, and
+   * by the time a detection returns the sampling canvas has been drawn over
+   * several times. The lock likewise needs the newest frame, not the last
+   * sampled one, so it gets its own.
+   */
+  const identified = useRef<HTMLCanvasElement | null>(null);
+  const searching = useRef<HTMLCanvasElement | null>(null);
+  const lockScratch = useRef<HTMLCanvasElement | null>(null);
   const lastDetectEmbed = useRef<Float32Array | null>(null);
   const [tracks, setTracks] = useState<Track[]>([]);
   const [scenery, setScenery] = useState(0);
@@ -236,6 +277,7 @@ export default function LivePage() {
       detecting.current = true;
       const capturedAt = Date.now();
       const capturedThumb = thumb;
+      const capturedFrame = copyOf(identified, surface);
       void (async () => {
         try {
           const beforeDetect = performance.now();
@@ -246,6 +288,7 @@ export default function LivePage() {
           tracker.current.update(
             detections.map(({ label, score, box }) => ({ label, score, box })),
             capturedAt,
+            capturedFrame ? { source: capturedFrame, scratch: offscreen(lockScratch) } : undefined,
           );
           const best = detections.slice().sort((a, b) => b.score - a.score)[0];
           if (best) {
@@ -322,18 +365,27 @@ export default function LivePage() {
   }, [judge]);
 
   /**
-   * Boxes move between detection passes.
+   * Boxes move between detection passes, by looking rather than guessing.
    *
    * The detector speaks a couple of times a second; the eye notices far finer
-   * steps than that. Carrying each track along its own velocity in between is
-   * what turns a sequence of jumps into something that follows the subject.
+   * steps than that. Carrying each track along its own velocity fills the gap
+   * smoothly but wrongly — a velocity is a claim about a future the subject has
+   * not agreed to, and the box slides off the moment it turns. So each frame the
+   * tracker is shown the actual pixels and finds its subjects again in them,
+   * which costs well under a millisecond apiece.
    */
   useEffect(() => {
     if (status !== "running") return;
-    const id = setInterval(
-      () => setTracks(tracker.current.salient(Date.now(), ATTEND_TO)),
-      PREDICT_MS,
-    );
+    const id = setInterval(() => {
+      const now = Date.now();
+      const element = video.current;
+      const sampled = canvas.current;
+      if (element && sampled?.width && element.readyState >= 2) {
+        const frame = copyOf(searching, sampled, element);
+        if (frame) tracker.current.look({ source: frame, scratch: offscreen(lockScratch) }, now);
+      }
+      setTracks(tracker.current.salient(now, ATTEND_TO));
+    }, PREDICT_MS);
     return () => clearInterval(id);
   }, [status]);
 

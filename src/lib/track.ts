@@ -13,7 +13,12 @@
  * almost identically at these frame rates and is far easier to reason about.
  */
 
+import { print, relock, type Print } from "./lock.ts";
+
 export type Box = { x1: number; y1: number; x2: number; y2: number };
+
+/** The current frame, and a canvas to resample through. */
+export type Sight = { source: HTMLCanvasElement; scratch: HTMLCanvasElement };
 
 export type Observation = { label: string; score: number; box: Box };
 
@@ -54,10 +59,56 @@ export type Track = {
   salience: number;
   /** True for what has sat still long enough to be scenery. */
   background: boolean;
+  /**
+   * What this looked like when the detector last confirmed it.
+   *
+   * Taken at identification and never refreshed from the lock's own output: a
+   * template rebuilt from where the tracker *thinks* the subject is will follow
+   * its own mistakes, and a box that drifts a pixel a frame ends up on the
+   * background with nothing to notice it went. Anchored to the last real
+   * sighting, error cannot compound.
+   */
+  template: Print | null;
+  /** How well the frame still matches that print: 1 at a sighting, 0 when lost. */
+  lock: number;
 };
 
 /** Overlap below this is not the same object, however alike the labels. */
 export const IOU_GATE = 0.2;
+
+/**
+ * Correlation below this is not worth moving a box for.
+ *
+ * Set from measurement rather than taste: on prints of the same subject moved
+ * across a frame the match holds around 0.8, while a contrast-inverted impostor
+ * peaks near 0.64 and noise near 0.24. Half sits below anything real and above
+ * anything measured that was not the subject, and a lock that falls short
+ * simply leaves the box to its predicted position rather than guessing.
+ */
+export const LOCK_KEEP = 0.5;
+
+/**
+ * How much time must have passed for a lock to say anything about speed.
+ *
+ * A displacement divided by a millisecond is not a velocity, it is a rounding
+ * error with a large number attached. Looking can land immediately after a
+ * detection, and taking that as motion sent boxes flying off the frame at
+ * hundreds of pixels a second. Below this the lock still places the box; it
+ * just does not pretend to have measured how fast it got there.
+ */
+export const LOOK_MIN_MS = 30;
+
+/**
+ * Overlap at which two locks are claiming the same thing.
+ *
+ * When one subject passes in front of another the one behind has nothing left to
+ * match, and the best patch in its neighbourhood is the subject in front — so it
+ * locks onto that and the two identities swap. Two things cannot be in the same
+ * place, which is the same one-to-one reasoning the detector association already
+ * uses, so the weaker claim is dropped and that track falls back to prediction —
+ * which is what carries identity through a crossing in the first place.
+ */
+export const LOCK_CLAIM = 0.5;
 /**
  * The gate relaxes as time passes between looks.
  *
@@ -177,7 +228,7 @@ export class Tracker {
    * handful of boxes the two agree almost always, and greedy is far easier to
    * follow when a result looks wrong.
    */
-  update(observations: Observation[], now: number): Track[] {
+  update(observations: Observation[], now: number, frame?: Sight): Track[] {
     const predicted = this.tracks.map((t) => ({ track: t, box: predictBox(t, now) }));
     const pairs: Array<{ i: number; j: number; overlap: number }> = [];
     predicted.forEach((p, i) => {
@@ -218,7 +269,7 @@ export class Tracker {
      */
     const flow = median2(matched.map((m) => m.shift));
     for (const m of matched) {
-      this.observe(m.track, m.box, m.observation, now, flow);
+      this.observe(m.track, m.box, m.observation, now, flow, frame);
     }
 
     predicted.forEach((p, i) => {
@@ -244,7 +295,12 @@ export class Tracker {
         pace: 0,
         salience: 0,
         background: false,
+        template: null,
+        // No evidence yet that this is still in shot, and none is claimed: until
+        // something has actually looked, only the detector's word keeps a box.
+        lock: 0,
       });
+      this.remember(this.tracks[this.tracks.length - 1], frame);
     });
 
     this.tracks = this.tracks.filter(
@@ -259,6 +315,7 @@ export class Tracker {
     observation: Observation,
     now: number,
     flow: { x: number; y: number } = { x: 0, y: 0 },
+    frame?: Sight,
   ) {
     const dt = Math.max(now - track.lastSeen, 1);
     /**
@@ -295,6 +352,73 @@ export class Tracker {
     const moved = Math.hypot(after.x - before.x - flow.x, after.y - before.y - flow.y);
     track.travelled += moved;
     this.rate(track, now);
+    this.remember(track, frame);
+  }
+
+  /**
+   * Keep a print of what the detector just confirmed.
+   *
+   * A refused print — too small a box, or a patch so flat it would match
+   * anywhere — leaves the previous one in place rather than clearing it: one
+   * awkward crop is not a reason to throw away a working template.
+   */
+  private remember(track: Track, frame?: Sight) {
+    if (!frame) return;
+    track.template = print(frame.source, track.box, frame.scratch) ?? track.template;
+    if (track.template) track.lock = 1;
+  }
+
+  /**
+   * Find every track again in the current frame, by its own appearance.
+   *
+   * This is the difference between a box that follows a subject and one that
+   * follows an assumption. Between detector passes a velocity says where a
+   * thing *ought* to be, which is wrong the instant it turns; the print says
+   * where it *is*. Cheap enough — well under a millisecond each — to run on
+   * every displayed frame.
+   *
+   * A successful lock counts as having seen the track, so something the
+   * detector momentarily loses but which is plainly still in shot keeps its box
+   * instead of blinking out. The detector's own miss count is untouched, so
+   * MAX_MISSES still retires anything it has genuinely stopped finding.
+   */
+  look(frame: Sight, now: number): void {
+    const claims: Array<{ track: Track; found: NonNullable<ReturnType<typeof relock>> }> = [];
+    for (const track of this.tracks) {
+      if (!track.template) continue;
+      const found = relock(frame.source, track.template, predictBox(track, now), frame.scratch);
+      track.lock = found ? Math.max(found.score, 0) : 0;
+      if (found && found.score >= LOCK_KEEP) claims.push({ track, found });
+    }
+
+    // Strongest claim first, so a subject in plain view keeps what is its own and
+    // the one that has lost sight of itself is the one asked to let go.
+    claims.sort((a, b) => b.found.score - a.found.score);
+    const taken: Box[] = [];
+    for (const { track, found } of claims) {
+      if (taken.some((box) => iou(box, found.rect) > LOCK_CLAIM)) {
+        track.lock = 0;
+        continue;
+      }
+      taken.push(found.rect);
+
+      const elapsed = now - track.lastSeen;
+      if (elapsed >= LOOK_MIN_MS) {
+        const before = centre(track.box);
+        const after = centre(found.rect);
+        const measured = { x: (after.x - before.x) / elapsed, y: (after.y - before.y) / elapsed };
+        track.velocity = {
+          x: lerp(track.velocity.x, measured.x, VELOCITY_SMOOTHING),
+          y: lerp(track.velocity.y, measured.y, VELOCITY_SMOOTHING),
+        };
+      }
+      track.box = found.rect;
+      track.lastSeen = now;
+      // `travelled` is deliberately left alone. It is sampled by the detector at
+      // its own rhythm, and salience is calibrated against that; folding in ten
+      // sub-pixel corrections a second would let jitter accumulate into pace and
+      // promote parked cars to subjects.
+    }
   }
 
   /**
@@ -345,7 +469,11 @@ export class Tracker {
 
   private confirmed(): Track[] {
     return this.tracks
-      .filter((t) => t.hits >= MIN_HITS && t.misses === 0)
+      // A detector miss alone is not grounds to stop drawing a box: if the
+      // print still matches, the subject is visibly there and hiding it is the
+      // wrong answer. Without this a box vanishes the first pass the detector
+      // comes back empty, which is exactly when a viewer is still looking at it.
+      .filter((t) => t.hits >= MIN_HITS && (t.misses === 0 || t.lock >= LOCK_KEEP))
       .sort((a, b) => b.area - a.area);
   }
 

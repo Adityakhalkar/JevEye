@@ -3,6 +3,7 @@ import { test } from "node:test";
 
 import {
   IOU_GATE,
+  LOCK_KEEP,
   MAX_MISSES,
   MIN_HITS,
   Tracker,
@@ -13,6 +14,7 @@ import {
   predictBox,
   type Box,
 } from "./track.ts";
+import { asCanvas, boxAt, canvasOf, emptyScene, FRAME, sceneWith } from "./scene.mock.ts";
 
 const box = (x: number, y: number, w = 100, h = 100): Box => ({
   x1: x,
@@ -269,4 +271,116 @@ test("against that pan, something moving differently still stands out", () => {
   }
   const salient = t.salient(12 * 300);
   assert.deepEqual(salient.map((s) => s.label), ["dog"], "only the dog is doing anything");
+});
+
+/*
+ * Holding a box on a subject between detections.
+ *
+ * These use a mock scene so the subject's true position is known exactly, which
+ * is the only way to tell a box that follows the subject from one that follows
+ * an assumption about it.
+ */
+
+const lit = (x: number, y: number) => ({
+  source: asCanvas(sceneWith(x, y)),
+  scratch: asCanvas(canvasOf(24, 24, () => 0)),
+});
+const empty = () => ({
+  source: asCanvas(emptyScene()),
+  scratch: asCanvas(canvasOf(24, 24, () => 0)),
+});
+
+/** A tracker holding one confirmed track on a subject at (100, 80), standing still. */
+function watching() {
+  const t = new Tracker(FRAME.width * FRAME.height);
+  const frame = lit(100, 80);
+  t.update([seen("dog", boxAt(100, 80))], 0, frame);
+  t.update([seen("dog", boxAt(100, 80))], 300, frame);
+  return t;
+}
+
+test("the lock puts the box where the subject went, not where it was predicted", () => {
+  const t = watching();
+  // It was standing still, so prediction says it has not moved. It has.
+  t.look(lit(118, 90), 400);
+  const [track] = t.predict(400);
+  assert.ok(track, "the track survived");
+  assert.ok(
+    Math.hypot(track.box.x1 - 118, track.box.y1 - 90) < 2,
+    `box at ${track.box.x1.toFixed(0)},${track.box.y1.toFixed(0)}, subject at 118,90`,
+  );
+});
+
+test("a box the detector loses stays on a subject that is plainly still there", () => {
+  const t = watching();
+  t.update([], 700); // the detector comes back empty
+  t.look(lit(100, 80), 700);
+  const tracks = t.predict(700);
+  assert.equal(tracks.length, 1, "the box was dropped while the subject was in shot");
+  assert.ok(tracks[0].lock >= LOCK_KEEP);
+});
+
+test("a box is not held on a subject that has left", () => {
+  const t = watching();
+  t.update([], 700);
+  t.look(empty(), 700);
+  assert.equal(t.predict(700).length, 0, "a box was drawn on an empty field");
+});
+
+test("a still subject does not drag its box along with repeated looking", () => {
+  const t = watching();
+  const frame = lit(100, 80);
+  for (let i = 1; i <= 40; i++) t.look(frame, 300 + i * 100);
+  const [track] = t.predict(4300);
+  assert.ok(track, "the track survived forty frames of looking");
+  const crept = Math.hypot(track.box.x1 - 100, track.box.y1 - 80);
+  assert.ok(crept < 1.5, `the box crept ${crept.toFixed(2)}px while nothing moved`);
+});
+
+test("the lock follows a subject across the frame without the detector's help", () => {
+  const t = watching();
+  let at = 100;
+  for (let i = 1; i <= 12; i++) {
+    at += 8;
+    t.look(lit(at, 80), 300 + i * 100);
+  }
+  const [track] = t.predict(1500);
+  assert.ok(track, "the track survived the crossing");
+  assert.ok(
+    Math.abs(track.box.x1 - at) < 3,
+    `box at ${track.box.x1.toFixed(0)}, subject at ${at}`,
+  );
+});
+
+test("looking without a template does nothing rather than throwing", () => {
+  const t = new Tracker(FRAME.width * FRAME.height);
+  t.update([seen("dog", boxAt(100, 80))], 0);
+  t.update([seen("dog", boxAt(100, 80))], 300);
+  t.look(lit(100, 80), 400);
+  assert.equal(t.predict(400).length, 1);
+});
+
+test("a lock landing right after a sighting does not invent a velocity", () => {
+  const t = watching();
+  // One millisecond later, a pixel across: a real interval this is not.
+  t.look(lit(101, 80), 301);
+  const [track] = t.predict(1301);
+  assert.ok(track, "the track survived");
+  assert.ok(
+    Math.abs(track.box.x1 - 101) < 30,
+    `a second later the box had flown to ${track.box.x1.toFixed(0)}`,
+  );
+});
+
+test("two tracks cannot both claim the same subject", () => {
+  const t = new Tracker(FRAME.width * FRAME.height);
+  const frame = lit(100, 80);
+  // Two labels over one subject, as happens the moment one passes in front of
+  // another: both prints are cut from the same pixels.
+  const both = [seen("dog", boxAt(100, 80)), seen("cat", boxAt(104, 82))];
+  t.update(both, 0, frame);
+  t.update(both, 300, frame);
+  t.look(frame, 400);
+  const holding = t.all().filter((track) => track.lock >= LOCK_KEEP);
+  assert.equal(holding.length, 1, `${holding.length} tracks claimed one subject`);
 });

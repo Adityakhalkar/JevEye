@@ -6,7 +6,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { Boxes, Toggle } from "@/components/Boxes";
 import { CHANGE_THRESHOLD, LiveWindow, attendingFrom, toSample, type LiveFacts } from "@/lib/live";
-import { frameOf, type Frame } from "@/lib/lock";
+import { frameOf, print, type Frame } from "@/lib/lock";
 import { difference, thumbnail, type Thumb } from "@/lib/motion";
 import type { Found } from "@/lib/types";
 import { Tracker, heading, type Track } from "@/lib/track";
@@ -67,6 +67,17 @@ type Point = { at: number; change: number; asked: boolean };
 
 const ATTENTION_LEVELS = ["nothing here", "worth noticing", "look now"];
 
+/**
+ * How much finer the frame the boxes are held in is than the one they came from.
+ *
+ * The detector's input is small because the detector is slow. Holding a box needs
+ * no network, only pixels, and pixels are exactly what a subject seventeen
+ * pixels tall does not have enough of. Reading the video at twice the detector's
+ * size costs one more drawImage and a longer greyscale pass, and doubles the
+ * detail every match is decided on.
+ */
+const LOCK_DETAIL = 2;
+
 /** A canvas held in a ref, made on first use so nothing is built during render. */
 function offscreen(ref: { current: HTMLCanvasElement | null }): HTMLCanvasElement {
   ref.current ??= document.createElement("canvas");
@@ -86,16 +97,19 @@ function frameCopy(
   sized: HTMLCanvasElement,
   from: CanvasImageSource = sized,
   reuse?: Frame | null,
+  detail = LOCK_DETAIL,
 ): Frame | null {
   const target = offscreen(ref);
-  if (target.width !== sized.width || target.height !== sized.height) {
-    target.width = sized.width;
-    target.height = sized.height;
+  const width = sized.width * detail;
+  const height = sized.height * detail;
+  if (target.width !== width || target.height !== height) {
+    target.width = width;
+    target.height = height;
   }
   const context = target.getContext("2d", { willReadFrequently: true });
   if (!context) return null;
-  context.drawImage(from, 0, 0, target.width, target.height);
-  return frameOf(target, reuse);
+  context.drawImage(from, 0, 0, width, height);
+  return frameOf(target, reuse, detail);
 }
 
 export default function LivePage() {
@@ -288,7 +302,11 @@ export default function LivePage() {
       detecting.current = true;
       const capturedAt = Date.now();
       const capturedThumb = thumb;
-      const capturedFrame = frameCopy(identified, surface);
+      const capturedDetail = Math.max(
+        1,
+        Math.min(LOCK_DETAIL, (video.current?.videoWidth ?? surface.width) / surface.width),
+      );
+      const capturedFrame = frameCopy(identified, surface, surface, null, capturedDetail);
       void (async () => {
         try {
           const beforeDetect = performance.now();
@@ -394,7 +412,10 @@ export default function LivePage() {
       const sampled = canvas.current;
       if (element && sampled?.width && element.readyState >= 2) {
         const before = performance.now();
-        const frame = frameCopy(searching, sampled, element, searchFrame.current);
+        // Never ask for more detail than the video has: beyond its own width the
+        // extra pixels are interpolation, and interpolation cannot be recognised.
+        const detail = Math.max(1, Math.min(LOCK_DETAIL, element.videoWidth / sampled.width));
+        const frame = frameCopy(searching, sampled, element, searchFrame.current, detail);
         searchFrame.current = frame;
         if (frame) tracker.current.look(frame, now, ATTEND_TO);
         lookMs.current = performance.now() - before;

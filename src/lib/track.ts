@@ -13,7 +13,7 @@
  * almost identically at these frame rates and is far easier to reason about.
  */
 
-import { print, relock, type Frame, type Print } from "./lock.ts";
+import { enough, freshen, print, relock, verify, type Frame, type Print } from "./lock.ts";
 
 export type Box = { x1: number; y1: number; x2: number; y2: number };
 
@@ -34,6 +34,18 @@ export type Track = {
   misses: number;
   firstSeen: number;
   lastSeen: number;
+  /**
+   * When the detector last found it, as distinct from when it was last seen.
+   *
+   * These part company once looking keeps a track alive on its own, and the
+   * difference matters for association. A lock says the thing is still there; it
+   * says nothing about the shape of the box, which it holds at a fixed size while
+   * the subject turns or approaches. So how much overlap to demand of the next
+   * sighting has to relax with time since the *detector* last agreed about the
+   * geometry. Timing it from the lock instead held every track at the strictest
+   * gate and only 39% of detections ever found their own track again.
+   */
+  lastDetected: number;
   /** Box area as a share of the frame, and whether that is growing. */
   area: number;
   areaTrend: "growing" | "shrinking" | "steady";
@@ -69,6 +81,15 @@ export type Track = {
   template: Print | null;
   /** How well the frame still matches that print: 1 at a sighting, 0 when lost. */
   lock: number;
+  /**
+   * Whether appearance can settle whether this is still there.
+   *
+   * A subject of seventeen pixels has no print worth matching, and treating the
+   * failure as absence is what made attention flicker: the thing was plainly in
+   * shot, the detector merely had not mentioned it this pass, and the lock could
+   * not speak for it either. When it cannot, silence has to be read as silence.
+   */
+  lockable: boolean;
 };
 
 /** Overlap below this is not the same object, however alike the labels. */
@@ -108,8 +129,84 @@ export const LOOK_MIN_MS = 30;
  */
 export const LOCK_CLAIM = 0.5;
 
+/**
+ * How sure a look must be before it is allowed to update what a thing looks like.
+ *
+ * Comfortably above the threshold for moving a box: a match good enough to act on
+ * is not necessarily good enough to learn from, and anything learned from a poor
+ * match is how a print walks off its subject.
+ */
+export const LOCK_TRUST = 0.7;
+
+/** How much of a trusted look is eased into the print each time. */
+export const FRESHEN_RATE = 0.12;
+
+/**
+ * How long something is taken on trust after a miss, at least.
+ *
+ * Long enough to ride out a pass of a detector that finds a different third of a
+ * crowd each time, short enough that what has actually left is not outlined for
+ * long. Retirement still applies underneath.
+ */
+export const GRACE_MS = 2000;
+
+/**
+ * Patience, counted in the detector's own passes rather than in milliseconds.
+ *
+ * Every timeout here was set when the detector was assumed to speak often. It
+ * does not: on real footage a pass takes some 1.3 seconds, which made the 1.5
+ * second retirement barely one missed pass, and tracks were being forgotten
+ * faster than the grace meant to protect them could apply — twenty-seven of the
+ * forty-eight subjects that lost attention were simply retired out from under it.
+ * How long to wait is a question about the detector's rhythm, so it is measured
+ * from the detector's rhythm, and a slower machine is patient in proportion.
+ */
+const UNSEEN_PASSES = 2.5;
+const GRACE_PASSES = 1.5;
+
+/**
+ * However slow the detector, this is as long as anything is taken on trust.
+ *
+ * Patience that scales without limit would let a machine having a bad minute
+ * leave boxes on things that walked off ten seconds ago. Waiting for the
+ * detector is reasonable; waiting indefinitely is not.
+ */
+const MAX_PATIENCE_MS = 4000;
+
+/**
+ * How quickly the cadence estimate follows a change, deliberately slowly.
+ *
+ * One pass that takes a while is noise, not a new rhythm, and letting a single
+ * slow pass stretch the estimate would keep a track alive on the strength of an
+ * anomaly. Slow enough to ignore a spike, quick enough to settle within a few
+ * passes of a genuinely different machine.
+ */
+const CADENCE_SMOOTHING = 0.15;
+
 /** How many things are worth holding a box on, when nobody says otherwise. */
 export const ATTEND_LIMIT = 3;
+
+/**
+ * How much more salient a newcomer must be to take attention from what has it.
+ *
+ * Attention had no memory: every frame ranked everything afresh, so with a
+ * detector finding some eighteen new things a pass — half of them in places
+ * nothing was being tracked — whatever had just arrived kept displacing whatever
+ * was being followed. A newly created track has no measured pace yet and scores
+ * on its size and a novelty bonus alone, which is how a parked lorry unseats a
+ * running dog. Ties now go to whoever is already being watched.
+ */
+export const ATTENTION_MARGIN = 1.3;
+
+/**
+ * How long something must have been watched before it can unseat anything.
+ *
+ * Pace is distance over the track's lifetime, so at one sighting old it is
+ * either zero or nonsense. This is the interval over which a newcomer has to
+ * show what it is actually doing. It may still fill a seat nobody wants
+ * immediately — the wait is only to take one from something else.
+ */
+export const AUDITION_MS = 1200;
 /**
  * The gate relaxes as time passes between looks.
  *
@@ -208,6 +305,9 @@ function shift(box: Box, dx: number, dy: number): Box {
 export class Tracker {
   private tracks: Track[] = [];
   private nextId = 1;
+  /** Which tracks currently hold attention, and when that was last settled. */
+  private attending: number[] = [];
+  private attendedAt = -1;
   private frameArea: number;
   private frameSpan: number;
 
@@ -230,12 +330,17 @@ export class Tracker {
    * follow when a result looks wrong.
    */
   update(observations: Observation[], now: number, frame?: Frame): Track[] {
+    if (this.lastUpdate >= 0) {
+      const gap = now - this.lastUpdate;
+      this.cadence = this.cadence ? lerp(this.cadence, gap, CADENCE_SMOOTHING) : gap;
+    }
+    this.lastUpdate = now;
     const predicted = this.tracks.map((t) => ({ track: t, box: predictBox(t, now) }));
     const pairs: Array<{ i: number; j: number; overlap: number }> = [];
     predicted.forEach((p, i) => {
       // How much overlap to demand depends on how long it has been since this
       // track was last seen; see `gateFor`.
-      const gate = gateFor(now - p.track.lastSeen);
+      const gate = gateFor(now - p.track.lastDetected);
       observations.forEach((o, j) => {
         if (o.label !== p.track.label) return;
         const overlap = iou(p.box, o.box);
@@ -290,6 +395,7 @@ export class Tracker {
         misses: 0,
         firstSeen: now,
         lastSeen: now,
+        lastDetected: now,
         area: area(o.box) / this.frameArea,
         areaTrend: "steady",
         travelled: 0,
@@ -300,12 +406,13 @@ export class Tracker {
         // No evidence yet that this is still in shot, and none is claimed: until
         // something has actually looked, only the detector's word keeps a box.
         lock: 0,
+        lockable: false,
       });
       this.remember(this.tracks[this.tracks.length - 1], frame);
     });
 
     this.tracks = this.tracks.filter(
-      (t) => t.misses <= MAX_MISSES && now - t.lastSeen <= MAX_UNSEEN_MS,
+      (t) => t.misses <= MAX_MISSES && now - t.lastSeen <= this.patience(),
     );
     return this.confirmed();
   }
@@ -340,6 +447,7 @@ export class Tracker {
     track.hits += 1;
     track.misses = 0;
     track.lastSeen = now;
+    track.lastDetected = now;
     track.area = area(track.box) / this.frameArea;
 
     const change = previousArea > 0 ? (track.area - previousArea) / previousArea : 0;
@@ -354,6 +462,20 @@ export class Tracker {
     track.travelled += moved;
     this.rate(track, now);
     this.remember(track, frame);
+  }
+
+  /**
+   * Having seen something, whoever saw it.
+   *
+   * Retirement exists to forget what has left, and a thing whose own appearance
+   * is still where it should be has not left. The detector's silence is not
+   * evidence of absence when it has been measured to mention only a third of
+   * what is in front of it from one pass to the next. `hits` is left alone: that
+   * counts identifications, which is the detector's word and not the lock's.
+   */
+  private sighted(track: Track, now: number) {
+    track.lastSeen = now;
+    track.misses = 0;
   }
 
   /**
@@ -393,14 +515,38 @@ export class Tracker {
      * nobody is looking at. Ordered by salience so the ones on screen are the
      * ones kept, and the boxes that matter hold whatever else is in shot.
      */
-    const candidates = this.tracks
-      .filter((t) => t.template && !t.background)
-      .sort((a, b) => b.salience - a.salience)
-      .slice(0, limit);
+    const holding = this.tracks.filter((t) => t.template);
+    const searched = new Set(
+      holding
+        .filter((t) => !t.background)
+        .sort((a, b) => b.salience - a.salience)
+        .slice(0, limit),
+    );
+
+    /*
+     * Everything else is only asked whether it is still there.
+     *
+     * A detector that finds a different subset of a crowd every pass was retiring
+     * tracks it had merely failed to mention, and the next sighting arrived as a
+     * brand new object: thirty-five identities for three subjects. Confirming a
+     * print in place costs a thirtieth of a search, so everything in view can keep
+     * its identity through a dropout while only what is on screen pays to be
+     * located precisely.
+     */
+    for (const track of holding) {
+      if (searched.has(track) || !track.template) continue;
+      track.lockable = enough(frame, track.box);
+      if (!track.lockable) continue;
+      const still = verify(frame, track.template, predictBox(track, now));
+      track.lock = Math.max(still, 0);
+      if (still >= LOCK_KEEP) this.sighted(track, now);
+    }
 
     const claims: Array<{ track: Track; found: NonNullable<ReturnType<typeof relock>> }> = [];
-    for (const track of candidates) {
+    for (const track of searched) {
       if (!track.template) continue;
+      track.lockable = enough(frame, track.box);
+      if (!track.lockable) continue;
       const found = relock(frame, track.template, predictBox(track, now));
       track.lock = found ? Math.max(found.score, 0) : 0;
       if (found && found.score >= LOCK_KEEP) claims.push({ track, found });
@@ -428,7 +574,12 @@ export class Tracker {
         };
       }
       track.box = found.rect;
-      track.lastSeen = now;
+      this.sighted(track, now);
+      const template = track.template;
+      if (template && found.score >= LOCK_TRUST) {
+        const fresh = print(frame, found.rect);
+        if (fresh) track.template = freshen(template, fresh, FRESHEN_RATE);
+      }
       // `travelled` is deliberately left alone. It is sampled by the detector at
       // its own rhythm, and salience is calibrated against that; folding in ten
       // sub-pixel corrections a second would let jitter accumulate into pace and
@@ -459,11 +610,72 @@ export class Tracker {
    * background can still be answered — but scenery is not what the view is
    * about, and a list of eleven parked cars is not an understanding of it.
    */
-  salient(now: number, limit = 3): Track[] {
-    return this.predict(now)
-      .filter((t) => !t.background)
-      .sort((a, b) => b.salience - a.salience)
-      .slice(0, limit);
+  salient(now: number, limit = ATTEND_LIMIT): Track[] {
+    const live = this.predict(now).filter((t) => !t.background);
+    if (now !== this.attendedAt) {
+      this.attendedAt = now;
+      this.reconsider(live, now, limit);
+    }
+    const byId = new Map(live.map((t) => [t.id, t]));
+    return this.attending
+      .map((id) => byId.get(id))
+      .filter((t): t is Track => t !== undefined)
+      .sort((a, b) => b.salience - a.salience);
+  }
+
+  /**
+   * Who is being watched, changed only for good reason.
+   *
+   * Nothing is watched until it has been watched, which sounds circular and is
+   * the point: a seat is only given to something whose pace has had time to mean
+   * something. Filling free seats immediately was the larger half of the churn —
+   * seats come free constantly as subjects settle into scenery or leave, and
+   * each one was handed to whatever fresh box happened to be biggest, which in a
+   * crowded street is a different umbrella every time. Taking an *occupied* seat
+   * needs more than patience: a clear margin over the weakest sitting subject,
+   * so attention does not swap on a hair's difference.
+   *
+   * The honest cost is that a subject is not outlined for its first second, and
+   * that a seat sometimes sits empty. Showing two boxes is better than filling
+   * the third with whatever was nearest.
+   */
+  private reconsider(live: Track[], now: number, limit: number) {
+    const byId = new Map(live.map((t) => [t.id, t]));
+    const seated = this.attending.filter((id) => byId.has(id));
+    const queue = live
+      .filter((t) => !seated.includes(t.id))
+      .sort((a, b) => b.salience - a.salience);
+
+    /*
+     * Proven subjects first, then novelty if seats are still going spare.
+     *
+     * An audition cannot be an absolute requirement or nothing would ever be
+     * watched in the first second of a video, and someone walking into an empty
+     * room — interesting precisely because they are new — would go unmarked. So
+     * the rule is an order of preference: anything whose pace has been measured
+     * is preferred, and only if seats remain does something newly arrived get
+     * one. In a quiet scene it is the only candidate and is attended at once; in
+     * a crowd there is always something proven, and novelty waits its turn.
+     */
+    const auditioned = queue.filter((t) => now - t.firstSeen >= AUDITION_MS);
+    const newcomers = queue.filter((t) => now - t.firstSeen < AUDITION_MS);
+    while (seated.length < limit && auditioned.length) seated.push(auditioned.shift()!.id);
+    while (seated.length < limit && newcomers.length) seated.push(newcomers.shift()!.id);
+
+    for (const challenger of auditioned) {
+      let weakest = Infinity;
+      let seat = -1;
+      seated.forEach((id, i) => {
+        const salience = byId.get(id)!.salience;
+        if (salience < weakest) {
+          weakest = salience;
+          seat = i;
+        }
+      });
+      if (seat < 0 || challenger.salience <= weakest * ATTENTION_MARGIN) continue;
+      seated[seat] = challenger.id;
+    }
+    this.attending = seated.slice(0, limit);
   }
 
   /** Everything currently held, scenery included. */
@@ -479,16 +691,45 @@ export class Tracker {
    * velocity rather than sitting still and then teleporting.
    */
   predict(now: number): Track[] {
+    this.at = now;
     return this.confirmed().map((t) => ({ ...t, box: predictBox(t, now) }));
+  }
+
+  /** The moment the caller is asking about, so `confirmed` can judge a grace. */
+  private at = 0;
+  /** The interval between detection passes, as observed rather than assumed. */
+  private cadence = 0;
+  private lastUpdate = -1;
+
+  /** How long to keep something nothing has confirmed lately. */
+  private patience(): number {
+    return Math.min(Math.max(MAX_UNSEEN_MS, this.cadence * UNSEEN_PASSES), MAX_PATIENCE_MS);
+  }
+
+  /** How long a miss alone is not taken for absence. */
+  private grace(): number {
+    return Math.min(Math.max(GRACE_MS, this.cadence * GRACE_PASSES), MAX_PATIENCE_MS);
   }
 
   private confirmed(): Track[] {
     return this.tracks
-      // A detector miss alone is not grounds to stop drawing a box: if the
-      // print still matches, the subject is visibly there and hiding it is the
-      // wrong answer. Without this a box vanishes the first pass the detector
-      // comes back empty, which is exactly when a viewer is still looking at it.
-      .filter((t) => t.hits >= MIN_HITS && (t.misses === 0 || t.lock >= LOCK_KEEP))
+      /*
+       * A detector miss alone is not grounds to stop drawing a box.
+       *
+       * Three things can keep one: the detector has just seen it, the print still
+       * matches, or not long enough has passed to give up on it. The last exists
+       * because neither of the first two is a reliable witness to absence — a
+       * detector measured to mention only a third of what is in front of it, and
+       * a print that says nothing at all about a subject seventeen pixels tall or
+       * one that has stepped behind a lamp post. So the lock only ever extends
+       * confidence and never cuts it short, and what has really gone is forgotten
+       * by retirement rather than by a failed match.
+       */
+      .filter(
+        (t) =>
+          t.hits >= MIN_HITS &&
+          (t.misses === 0 || t.lock >= LOCK_KEEP || this.at - t.lastDetected < this.grace()),
+      )
       .sort((a, b) => b.area - a.area);
   }
 
@@ -500,6 +741,10 @@ export class Tracker {
   reset() {
     this.tracks = [];
     this.nextId = 1;
+    this.attending = [];
+    this.attendedAt = -1;
+    this.cadence = 0;
+    this.lastUpdate = -1;
   }
 }
 

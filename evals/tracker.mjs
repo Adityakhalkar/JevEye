@@ -148,6 +148,72 @@ const SCENARIOS = {
     return frames;
   },
 
+  /**
+   * A crowd the detector resolves differently each pass.
+   *
+   * Measured on real footage: about 27 boxes a pass, of which only ~30% overlap
+   * anything from the pass before — and that share does not improve if weak
+   * boxes are dropped (flat from a 0.5 floor to 0.95), nor once a whole-frame
+   * shift and zoom are allowed for (24% to 33%). The detector simply finds a
+   * different subset of a crowd every time it looks. Nothing can associate boxes
+   * to objects that were never detected, so what matters here is that the few
+   * subjects worth following stay followed, and that identity stops being
+   * invented dozens of times a second.
+   *
+   * Three movers worth watching, among twenty stationary things each detected
+   * about a third of the time. Only the movers are ground truth: tracking some
+   * of the clutter is not an error, inventing hundreds of identities is.
+   */
+  "a crowd resolved differently each pass": () => {
+    const dice = jitter(11);
+    const frames = [];
+    const clutter = [];
+    for (let k = 0; k < 20; k++) {
+      clutter.push({ id: `c${k}`, label: "car", box: box(30 + (k % 5) * 120, 40 + Math.floor(k / 5) * 60, 50, 50) });
+    }
+    for (let i = 0; i < 24; i++) {
+      const truth = [
+        { id: "A", label: "dog", box: box(20 + i * 24, 300) },
+        { id: "B", label: "person", box: box(600 - i * 22, 340) },
+        { id: "C", label: "person", box: box(100 + i * 18, 200) },
+      ];
+      const seen = [
+        ...truth.filter(() => dice(1) > -0.8).map((t) => ({ ...t, score: 0.9 })),
+        ...clutter.filter(() => dice(1) > 0.3).map((t) => ({ ...t, score: 0.8 })),
+      ];
+      frames.push({ truth, visible: [...truth, ...clutter], seen });
+    }
+    return frames;
+  },
+  /**
+   * A subject that turns between sightings.
+   *
+   * Every other case here moves in a straight line at a steady speed, which is
+   * precisely what a constant-velocity prediction assumes — so prediction scores
+   * nearly perfectly on them and the lock looks pointless. That is an artefact of
+   * the scenarios, not a fact about tracking. The moment a subject changes
+   * direction the prediction keeps going the old way and the box leaves the
+   * subject behind, which is the failure this was all built for: a dog doubling
+   * back while the detector is still thinking about the last frame.
+   */
+  "a subject that turns between sightings": () => {
+    const frames = [];
+    let x = 300;
+    let step = 26;
+    for (let i = 0; i < 24; i++) {
+      if (i % 6 === 0 && i > 0) step = -step; // doubles back every six frames
+      x += step;
+      const truth = [{ id: "A", label: "dog", box: box(x, 240, 60, 60) }];
+      frames.push({
+        truth,
+        visible: truth,
+        // The detector speaks once every three frames, so a turn is always taken
+        // on the prediction's word alone.
+        seen: i % 3 === 0 ? truth.map((t) => ({ ...t, score: 0.9 })) : [],
+      });
+    }
+    return frames;
+  },
 };
 
 function crossingWithGap() {
@@ -217,9 +283,14 @@ function run(name, frames, { lock } = { lock: true }) {
   const assigned = new Map(); // ground-truth id -> track id it was last matched to
   let switches = 0;
   let covered = 0;
+  let fit = 0;
   let total = 0;
   let ghosts = 0;
   const born = new Set();
+  // How often the set of things being watched changes, and who holds a seat.
+  let attentionChanges = 0;
+  let attended = [];
+  const seatFrames = new Map();
 
   frames.forEach((frame, i) => {
     const now = i * STEP_MS;
@@ -241,6 +312,7 @@ function run(name, frames, { lock } = { lock: true }) {
       const match = matched.get(ti);
       if (!match) return;
       covered += 1;
+      fit += iou(truth.box, match.box);
       const twinned = frame.truth.some((o, oi) => oi !== ti && iou(o.box, truth.box) > AMBIGUOUS);
       if (twinned) return; // nothing to conclude, and the last assignment stands
       const previous = assigned.get(truth.id);
@@ -251,17 +323,34 @@ function run(name, frames, { lock } = { lock: true }) {
     // Tracks matching nothing real are inventions.
     ghosts += tracks.filter((_, ki) => !usedTracks.has(ki)).length;
     tracks.forEach((t) => born.add(t.id));
+
+    const watching = tracker.salient(now).map((t) => t.id);
+    watching.forEach((id) => seatFrames.set(id, (seatFrames.get(id) ?? 0) + 1));
+    if (watching.length !== attended.length || watching.some((id) => !attended.includes(id))) {
+      attentionChanges += 1;
+    }
+    attended = watching;
   });
 
   return {
     name,
     switches,
     coverage: covered / total,
+    // How well a drawn box actually sits on its subject. Coverage says a box was
+    // there; this says it was in the right place, which is the lock's whole job.
+    fit: covered ? fit / covered : 0,
     ghostFrames: ghosts,
     // One identity per real object is the ideal; more means the tracker keeps
     // rediscovering the same thing.
     births: born.size,
-    objects: new Set(frames.flatMap((f) => f.truth.map((t) => t.id))).size,
+    attentionChanges,
+    // How long a subject keeps attention once it has it, in frames.
+    heldFor: seatFrames.size
+      ? [...seatFrames.values()].reduce((a, b) => a + b, 0) / seatFrames.size
+      : 0,
+    // Everything actually in shot, not only what is scored: one identity per
+    // object present is the ideal, and more than that is churn.
+    objects: new Set(frames.flatMap((f) => (f.visible ?? f.truth).map((t) => t.id))).size,
   };
 }
 
@@ -276,6 +365,23 @@ const THRESHOLDS = {
   // survives without appearance features.
   "crossing behind an occlusion": { switches: 0, coverage: 0.5, ghostFrames: 4 },
   "coming closer while the detector lags": { switches: 0, coverage: 0.7, ghostFrames: 2, births: 1 },
+  // Clutter may be tracked; identity may not be invented without limit. The
+  // three movers are what must stay followed.
+  // 23 things are in shot. Roughly one identity each is the goal; half again as
+  // many means the tracker is rediscovering what it already had.
+  // Prediction cannot do this one: the whole point is that the box has to be
+  // placed by looking, because the assumption it would otherwise be placed by is
+  // wrong the moment the subject turns.
+  "a subject that turns between sightings": { switches: 0, coverage: 0.8, ghostFrames: 2, births: 1, fit: 0.6 },
+  "a crowd resolved differently each pass": {
+    switches: 2,
+    coverage: 0.7,
+    ghostFrames: 400,
+    births: 26,
+    // Three subjects are worth watching among twenty that are not. Attention
+    // should settle on them, not be renegotiated every time the detector speaks.
+    attentionChanges: 8,
+  },
 };
 
 export function evaluateTracker() {
@@ -294,24 +400,42 @@ export function evaluateTracker() {
       r.switches <= limit.switches &&
       r.coverage >= limit.coverage &&
       r.ghostFrames <= limit.ghostFrames &&
-      r.births <= (limit.births ?? Infinity);
+      r.births <= (limit.births ?? Infinity) &&
+      r.attentionChanges <= (limit.attentionChanges ?? Infinity) &&
+      r.fit >= (limit.fit ?? 0);
     if (!ok) failures += 1;
     console.log(
       `  ${ok ? "pass" : "FAIL"}  ${r.name.padEnd(46)} ` +
         `id switches ${r.switches} (max ${limit.switches}), ` +
         `covered ${(r.coverage * 100).toFixed(0)}% (min ${limit.coverage * 100}%), ` +
+        `box sat on it ${(r.fit * 100).toFixed(0)}%${limit.fit ? ` (min ${limit.fit * 100}%)` : ""}, ` +
         `phantom boxes ${r.ghostFrames} (max ${limit.ghostFrames})` +
         (limit.births === undefined
           ? ""
-          : `, identities ${r.births} for ${r.objects} object${r.objects === 1 ? "" : "s"} (max ${limit.births})`),
+          : `, identities ${r.births} for ${r.objects} object${r.objects === 1 ? "" : "s"} in view (max ${limit.births})`) +
+        (limit.attentionChanges === undefined
+          ? ""
+          : `, attention changed ${r.attentionChanges}x (max ${limit.attentionChanges}), each subject held it ${r.heldFor.toFixed(1)} frames`),
     );
-    const gained = r.coverage - r.blind.coverage;
+    const heldMore = (r.coverage - r.blind.coverage) * 100;
+    const satBetter = (r.fit - r.blind.fit) * 100;
+    const verdict =
+      Math.abs(heldMore) < 0.5 && Math.abs(satBetter) < 0.5
+        ? "the lock makes no difference here"
+        : [
+            Math.abs(heldMore) >= 0.5
+              ? `${heldMore > 0 ? "+" : ""}${heldMore.toFixed(0)} points of coverage`
+              : null,
+            Math.abs(satBetter) >= 0.5
+              ? `${satBetter > 0 ? "+" : ""}${satBetter.toFixed(0)} points of fit`
+              : null,
+          ]
+            .filter(Boolean)
+            .join(", ") + " from the lock";
     console.log(
       `        without the visual lock: covered ${(r.blind.coverage * 100).toFixed(0)}%, ` +
-        `id switches ${r.blind.switches}, identities ${r.blind.births}` +
-        (Math.abs(gained) < 0.005
-          ? " — the lock makes no difference here"
-          : ` — the lock ${gained > 0 ? "adds" : "costs"} ${Math.abs(gained * 100).toFixed(0)} points of coverage`),
+        `box sat on it ${(r.blind.fit * 100).toFixed(0)}%, id switches ${r.blind.switches}, ` +
+        `identities ${r.blind.births} — ${verdict}`,
     );
   }
   return failures;

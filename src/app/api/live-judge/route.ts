@@ -41,7 +41,10 @@ function observations(facts: LiveFacts) {
       facts.attending?.length > 0
         ? facts.attending.map(
             (a) =>
-              `${a.label} #${a.id}: ${a.heading}, in view ${a.seconds}s, covering ${Math.round(a.covers * 100)}% of the frame`,
+              `${a.label} #${a.id}: ${a.heading}, in view ${a.seconds}s, covering ${Math.round(a.covers * 100)}% of the frame` +
+              (a.held === "by sight"
+                ? ""
+                : " — NOT currently recognised: too small or out of sight, so which one this is and how long it has been here are assumed rather than seen"),
           )
         : "nothing is moving; whatever is in view is holding still",
     set_aside_as_scenery: `${facts.scenery ?? 0} other things that have not moved`,

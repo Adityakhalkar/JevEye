@@ -16,7 +16,7 @@
  * time per frame to obtain — most of a sample's budget, spent to produce one
  * number, while the video stuttered behind it.
  */
-import type { Track } from "./track.ts";
+import { LOCK_KEEP, type Track } from "./track.ts";
 import type { Choice } from "./vision.ts";
 
 /** One look at the scene. */
@@ -49,6 +49,18 @@ export type Attending = {
   seconds: number;
   heading: string;
   covers: number;
+  /**
+   * Whether this is still being recognised, or merely assumed to be where it
+   * should be.
+   *
+   * Everything else in this record — the identity, how long it has been in view,
+   * which way it is going — rests on the thing having been followed correctly,
+   * and sometimes it has not been. A subject of seventeen pixels has no
+   * appearance to recognise, and one behind a lamp post has none to see, so what
+   * is reported about it is an assumption carried forward. Saying so is the
+   * difference between a judgement and a guess dressed as one.
+   */
+  held: "by sight" | "assumed";
 };
 
 export type LiveFacts = {
@@ -231,6 +243,7 @@ export function attendingFrom(track: Track, now: number, heading: string): Atten
     seconds: Number(((now - track.firstSeen) / 1000).toFixed(1)),
     heading,
     covers: Number(track.area.toFixed(3)),
+    held: track.lock >= LOCK_KEEP ? "by sight" : "assumed",
   };
 }
 

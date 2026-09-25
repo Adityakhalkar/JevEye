@@ -3,6 +3,7 @@ import { test } from "node:test";
 
 import {
   IOU_GATE,
+  GRACE_MS,
   LOCK_KEEP,
   MAX_MISSES,
   MIN_HITS,
@@ -314,11 +315,19 @@ test("a box the detector loses stays on a subject that is plainly still there", 
   assert.ok(tracks[0].lock >= LOCK_KEEP);
 });
 
-test("a box is not held on a subject that has left", () => {
+test("a box is let go of once nothing has confirmed the subject for a while", () => {
   const t = watching();
   t.update([], 700);
   t.look(empty(), 700);
-  assert.equal(t.predict(700).length, 0, "a box was drawn on an empty field");
+  // A failed match does not itself hide the box: the subject may merely have
+  // stepped behind something, and the detector's silence proves nothing either.
+  assert.equal(t.predict(700).length, 1, "it was given up on at the first failed look");
+  // Past the grace, with nothing having confirmed it, it goes.
+  for (let at = 1000; at <= 300 + GRACE_MS + 300; at += 300) {
+    t.update([], at);
+    t.look(empty(), at);
+  }
+  assert.equal(t.predict(300 + GRACE_MS + 300).length, 0, "a box was still drawn on an empty field");
 });
 
 test("a still subject does not drag its box along with repeated looking", () => {

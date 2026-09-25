@@ -6,10 +6,11 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { Boxes, Toggle } from "@/components/Boxes";
 import { CHANGE_THRESHOLD, LiveWindow, attendingFrom, toSample, type LiveFacts } from "@/lib/live";
-import { frameOf, print, type Frame } from "@/lib/lock";
+import { Doubt, outward } from "@/lib/fovea";
+import { frameOf, type Frame } from "@/lib/lock";
 import { difference, thumbnail, type Thumb } from "@/lib/motion";
 import type { Found } from "@/lib/types";
-import { Tracker, heading, type Track } from "@/lib/track";
+import { Tracker, heading, type Box, type Track } from "@/lib/track";
 import {
   DETECT_EDGE_LIVE,
   classify,
@@ -85,6 +86,37 @@ function offscreen(ref: { current: HTMLCanvasElement | null }): HTMLCanvasElemen
 }
 
 /**
+ * A region of the video, at the video's own resolution, for a closer look.
+ *
+ * Taken from the element rather than from the sampled canvas: the sampled canvas
+ * has already thrown away the detail this exists to recover.
+ */
+function crop(
+  ref: { current: HTMLCanvasElement | null },
+  element: HTMLVideoElement,
+  region: Box,
+  sampled: { width: number; height: number },
+): HTMLCanvasElement | null {
+  const scaleX = element.videoWidth / sampled.width;
+  const scaleY = element.videoHeight / sampled.height;
+  const sx = region.x1 * scaleX;
+  const sy = region.y1 * scaleY;
+  const sw = (region.x2 - region.x1) * scaleX;
+  const sh = (region.y2 - region.y1) * scaleY;
+  if (sw < 16 || sh < 16) return null;
+
+  const target = offscreen(ref);
+  if (target.width !== Math.round(sw) || target.height !== Math.round(sh)) {
+    target.width = Math.round(sw);
+    target.height = Math.round(sh);
+  }
+  const context = target.getContext("2d");
+  if (!context) return null;
+  context.drawImage(element, sx, sy, sw, sh, 0, 0, target.width, target.height);
+  return target;
+}
+
+/**
  * A frame read into plain brightness values, in the pixels boxes are measured in.
  *
  * Both the print taken at identification and the frame searched afterwards have
@@ -140,6 +172,13 @@ export default function LivePage() {
   const searching = useRef<HTMLCanvasElement | null>(null);
   /** The search frame's buffer, reused so the collector has nothing to do. */
   const searchFrame = useRef<Frame | null>(null);
+  /** Where the system is least sure, and whether the next pass is a close one. */
+  const doubt = useRef(new Doubt());
+  const closely = useRef(false);
+  const fovea = useRef<HTMLCanvasElement | null>(null);
+  /** The last close look's region, drawn so it is visible what is being examined. */
+  const lastLook = useRef<Box | null>(null);
+  const [looking, setLooking] = useState<Box | null>(null);
   const lastDetectEmbed = useRef<Float32Array | null>(null);
   const [tracks, setTracks] = useState<Track[]>([]);
   const [scenery, setScenery] = useState(0);
@@ -163,6 +202,12 @@ export default function LivePage() {
   /** The detector's most recent boxes, in the sampled frame's pixels. */
   const [found, setFound] = useState<{ boxes: Found[]; size: { width: number; height: number } } | null>(null);
   const [showBoxes, setShowBoxes] = useState(true);
+  /** What the viewer has asked to follow, if anything. */
+  const [following, setFollowing] = useState<{ id: number; label: string } | null>(null);
+  /** When a click landed on nothing recognisable, so the page can say so. */
+  const [pickFailed, setPickFailed] = useState(0);
+  /** When what was being followed was lost, so the page can admit it. */
+  const [lostAt, setLostAt] = useState(0);
   const [showNumbers, setShowNumbers] = useState(false);
   /** Which catalogue Jev says the watcher means; objects until told otherwise. */
   const [vocabulary, setVocabulary] = useState<VocabularyId>("objects");
@@ -307,10 +352,37 @@ export default function LivePage() {
         Math.min(LOCK_DETAIL, (video.current?.videoWidth ?? surface.width) / surface.width),
       );
       const capturedFrame = frameCopy(identified, surface, surface, null, capturedDetail);
+
+      /**
+       * Every other pass looks closely at whatever is least understood.
+       *
+       * The detector's cost is set by its input size, not by how much of the
+       * world that input covers — so a pass spent on two fifths of the frame,
+       * cropped from the video at its own resolution, costs exactly what a wide
+       * pass costs and arrives with four times the detail. That matters because
+       * detail is the thing that was missing: the median subject worth watching
+       * is seventeen pixels tall in a 336-pixel frame, and nothing recognises
+       * anything at that size.
+       *
+       * Wide passes still alternate in, because a close look cannot find what it
+       * is not pointed at, and something has to keep the whole scene in view.
+       */
+      const close = closely.current && element.videoWidth > surface.width;
+      closely.current = !closely.current;
+      const region = close ? doubt.current.where(surface, capturedAt) : null;
+      const looked = region ? crop(fovea, element, region, surface) : null;
+      const image = looked ? RawImage.fromCanvas(looked) : frame;
+
       void (async () => {
         try {
           const beforeDetect = performance.now();
-          const detections = await detectObjects(frame, 0.5, DETECT_EDGE_LIVE);
+          const raw = await detectObjects(image, 0.5, DETECT_EDGE_LIVE);
+          const detections =
+            region && looked
+              ? raw.map((d) => ({ ...d, box: outward(d.box, region, looked) }))
+              : raw;
+          if (region) doubt.current.looked(region, surface, capturedAt);
+          lastLook.current = region;
           lastDetectMs.current = Math.round(performance.now() - beforeDetect);
           detectThumb.current = capturedThumb;
           tracker.current.setFrameArea(surface.width * surface.height);
@@ -318,6 +390,9 @@ export default function LivePage() {
             detections.map(({ label, score, box }) => ({ label, score, box })),
             capturedAt,
             capturedFrame ?? undefined,
+            // A close look says nothing about the rest of the frame, so the rest
+            // of the frame is not counted as missing.
+            region ?? undefined,
           );
           const best = detections.slice().sort((a, b) => b.score - a.score)[0];
           if (best) {
@@ -417,10 +492,28 @@ export default function LivePage() {
         const detail = Math.max(1, Math.min(LOCK_DETAIL, element.videoWidth / sampled.width));
         const frame = frameCopy(searching, sampled, element, searchFrame.current, detail);
         searchFrame.current = frame;
-        if (frame) tracker.current.look(frame, now, ATTEND_TO);
+        if (frame) {
+          tracker.current.look(frame, now, ATTEND_TO);
+          // What the tracker could not settle becomes where the detector goes next.
+          doubt.current.observe(
+            tracker.current.all().map((t) => ({ box: t.box, lock: t.lock, lockable: t.lockable })),
+            sampled,
+            now,
+          );
+        }
         lookMs.current = performance.now() - before;
       }
       setTracks(tracker.current.salient(now, ATTEND_TO));
+      setLooking(lastLook.current);
+      // If what someone asked for has left, stop claiming to follow it — and say
+      // so, rather than quietly going back to waiting as though nothing happened.
+      setFollowing((held) => {
+        if (!held) return held;
+        const still = tracker.current.following();
+        if (still) return { id: still.id, label: still.label };
+        setLostAt(Date.now());
+        return null;
+      });
     }, PREDICT_MS);
     return () => clearInterval(id);
   }, [status]);
@@ -557,7 +650,39 @@ export default function LivePage() {
           }}
           className="relative overflow-hidden rounded-lg border border-rule bg-panel"
         >
-          <span className="relative block">
+          <span
+            className={`relative block ${status === "running" ? "cursor-crosshair" : ""}`}
+            onClick={(event) => {
+              if (status !== "running") return;
+              const sampled = canvas.current;
+              const element = video.current;
+              if (!sampled?.width || !element) return;
+
+              // The click arrives in screen pixels; boxes live in the sampled
+              // frame's. One ratio converts between them.
+              const bounds = event.currentTarget.getBoundingClientRect();
+              const point = {
+                x: ((event.clientX - bounds.left) / bounds.width) * sampled.width,
+                y: ((event.clientY - bounds.top) / bounds.height) * sampled.height,
+              };
+              if (following) {
+                tracker.current.release();
+                setFollowing(null);
+                setLostAt(0);
+                return;
+              }
+              setLostAt(0);
+              const detail = Math.max(
+                1,
+                Math.min(LOCK_DETAIL, element.videoWidth / sampled.width),
+              );
+              const frame = frameCopy(searching, sampled, element, null, detail);
+              if (!frame) return;
+              const picked = tracker.current.follow(point, frame, Date.now());
+              setFollowing(picked ? { id: picked.id, label: picked.label } : null);
+              if (!picked) setPickFailed(Date.now());
+            }}
+          >
             <video ref={video} playsInline muted className="block w-full" />
             {showBoxes && found && tracks.length > 0 && status === "running" && (
               <Boxes
@@ -568,11 +693,28 @@ export default function LivePage() {
                   box: t.box,
                 }))}
                 size={found.size}
+                highlight={following?.id}
+                looking={looking}
               />
             )}
           </span>
           <canvas ref={canvas} className="hidden" />
           <canvas ref={scratch} className="hidden" />
+          {status === "running" && (
+            <figcaption className="absolute right-0 top-0 bg-ground/80 px-3 py-1.5 text-ink-3 backdrop-blur-sm">
+              {following ? (
+                <span className="text-[#f4c542]">
+                  following {following.label} — click to let go
+                </span>
+              ) : pickFailed && Date.now() - pickFailed < 4000 ? (
+                <span>nothing there distinct enough to follow</span>
+              ) : lostAt && Date.now() - lostAt < 4000 ? (
+                <span>lost it — click something else to follow</span>
+              ) : (
+                <span>click anything to follow it</span>
+              )}
+            </figcaption>
+          )}
           {now && status === "running" && (
             <figcaption className="absolute bottom-0 left-0 flex items-baseline gap-2 bg-ground/80 px-3 py-1.5 text-ink-2 backdrop-blur-sm">
               <span className={now.named ? "text-ink" : "text-ink-3"}>

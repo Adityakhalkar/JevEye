@@ -17,12 +17,23 @@ export function Boxes({
   found,
   size,
   limit = MOST_BOXES,
+  highlight,
+  looking,
 }: {
   found: Found[];
   size: { width: number; height: number };
   limit?: number;
+  /** The id, appearing in a label as "#n", that someone asked to follow. */
+  highlight?: number;
+  /**
+   * The region the detector last examined closely.
+   *
+   * Worth showing rather than hiding: it is the system deciding where it is least
+   * sure, and watching it move is watching it think.
+   */
+  looking?: { x1: number; y1: number; x2: number; y2: number } | null;
 }) {
-  if (found.length === 0) return null;
+  if (found.length === 0 && !looking) return null;
 
   /**
    * The strongest few, not everything.
@@ -46,8 +57,37 @@ export function Boxes({
       className="pointer-events-none absolute inset-0 h-full w-full"
       aria-hidden
     >
+      {looking && (
+        <g>
+          <rect
+            x={looking.x1}
+            y={looking.y1}
+            width={looking.x2 - looking.x1}
+            height={looking.y2 - looking.y1}
+            fill="none"
+            stroke="var(--color-ink-3)"
+            strokeWidth={fontSize * 0.08}
+            strokeDasharray={`${fontSize * 0.5} ${fontSize * 0.4}`}
+            rx={fontSize * 0.2}
+          />
+          <text
+            x={looking.x1 + pad}
+            y={looking.y2 - pad * 2}
+            fontSize={fontSize * 0.8}
+            fontFamily="var(--font-mono)"
+            fill="var(--color-ink-3)"
+          >
+            looking closely
+          </text>
+        </g>
+      )}
       {shown.map((f, i) => {
-        const label = `${f.label} ${Math.round(f.score * 100)}%`;
+        // The one thing someone chose is drawn to stand out from the ones the
+        // system chose for itself, because which is which is worth seeing.
+        const chosen = highlight !== undefined && f.label.includes(`#${highlight}`);
+        const label = chosen
+          ? `following ${f.label}`
+          : `${f.label} ${Math.round(f.score * 100)}%`;
         const labelW = label.length * fontSize * 0.6 + pad * 2;
         const above = f.box.y1 > fontSize * 1.8;
         const labelY = above ? f.box.y1 - fontSize * 1.6 : f.box.y1;
@@ -59,8 +99,8 @@ export function Boxes({
               width={f.box.x2 - f.box.x1}
               height={f.box.y2 - f.box.y1}
               fill="none"
-              stroke="var(--color-trace)"
-              strokeWidth={fontSize * 0.14}
+              stroke={chosen ? "#f4c542" : "var(--color-trace)"}
+              strokeWidth={fontSize * (chosen ? 0.24 : 0.14)}
               rx={fontSize * 0.2}
             />
             <rect
@@ -68,7 +108,7 @@ export function Boxes({
               y={labelY}
               width={labelW}
               height={fontSize * 1.6}
-              fill="var(--color-trace)"
+              fill={chosen ? "#f4c542" : "var(--color-trace)"}
               rx={fontSize * 0.2}
             />
             <text

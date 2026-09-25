@@ -183,6 +183,12 @@ const MAX_PATIENCE_MS = 4000;
  */
 const CADENCE_SMOOTHING = 0.15;
 
+/**
+ * How big a box to cut around a point nothing was detected at, as a share of the
+ * frame's span. Big enough to hold a subject, small enough to be mostly subject.
+ */
+const POINTED_AT = 0.16;
+
 /** How many things are worth holding a box on, when nobody says otherwise. */
 export const ATTEND_LIMIT = 3;
 
@@ -298,6 +304,13 @@ function blend(from: Box, to: Box, t: number): Box {
   };
 }
 
+/** Whether a point falls inside a region. */
+function within(point: { x: number; y: number }, region: Box): boolean {
+  return (
+    point.x >= region.x1 && point.x <= region.x2 && point.y >= region.y1 && point.y <= region.y2
+  );
+}
+
 function shift(box: Box, dx: number, dy: number): Box {
   return { x1: box.x1 + dx, y1: box.y1 + dy, x2: box.x2 + dx, y2: box.y2 + dy };
 }
@@ -305,6 +318,14 @@ function shift(box: Box, dx: number, dy: number): Box {
 export class Tracker {
   private tracks: Track[] = [];
   private nextId = 1;
+  /**
+   * The one thing someone has asked for, which outranks every judgement here.
+   *
+   * Salience is a guess at what matters, and a good one, but a person pointing at
+   * something is not a guess. A pinned track cannot be unseated, cannot be
+   * demoted to scenery, and is always looked for by name.
+   */
+  private pinned: number | null = null;
   /** Which tracks currently hold attention, and when that was last settled. */
   private attending: number[] = [];
   private attendedAt = -1;
@@ -329,7 +350,13 @@ export class Tracker {
    * handful of boxes the two agree almost always, and greedy is far easier to
    * follow when a result looks wrong.
    */
-  update(observations: Observation[], now: number, frame?: Frame): Track[] {
+  /**
+   * @param covered Which part of the frame this pass actually examined. A close
+   * look at one region says nothing about the rest, and counting everything
+   * outside it as missed would retire half the scene every time the detector
+   * looked somewhere in detail.
+   */
+  update(observations: Observation[], now: number, frame?: Frame, covered?: Box): Track[] {
     if (this.lastUpdate >= 0) {
       const gap = now - this.lastUpdate;
       this.cadence = this.cadence ? lerp(this.cadence, gap, CADENCE_SMOOTHING) : gap;
@@ -380,6 +407,7 @@ export class Tracker {
 
     predicted.forEach((p, i) => {
       if (takenTracks.has(i)) return;
+      if (covered && !within(centre(p.box), covered)) return; // nobody looked here
       p.track.misses += 1;
     });
 
@@ -412,7 +440,9 @@ export class Tracker {
     });
 
     this.tracks = this.tracks.filter(
-      (t) => t.misses <= MAX_MISSES && now - t.lastSeen <= this.patience(),
+      (t) =>
+        (t.id === this.pinned && t.lock >= LOCK_KEEP) ||
+        (t.misses <= MAX_MISSES && now - t.lastSeen <= this.patience()),
     );
     return this.confirmed();
   }
@@ -519,7 +549,11 @@ export class Tracker {
     const searched = new Set(
       holding
         .filter((t) => !t.background)
-        .sort((a, b) => b.salience - a.salience)
+        .sort((a, b) => {
+          if (a.id === this.pinned) return -1;
+          if (b.id === this.pinned) return 1;
+          return b.salience - a.salience;
+        })
         .slice(0, limit),
     );
 
@@ -599,7 +633,10 @@ export class Tracker {
     track.pace = track.travelled / this.frameSpan / seconds;
     const fresh = now - track.firstSeen < NOVELTY_MS;
     track.background =
-      !fresh && track.pace < STILL_PACE && now - track.firstSeen > SCENERY_AFTER_MS;
+      track.id !== this.pinned &&
+      !fresh &&
+      track.pace < STILL_PACE &&
+      now - track.firstSeen > SCENERY_AFTER_MS;
     track.salience = track.pace * 3 + Math.sqrt(track.area) * 0.5 + (fresh ? 0.15 : 0);
   }
 
@@ -642,6 +679,9 @@ export class Tracker {
   private reconsider(live: Track[], now: number, limit: number) {
     const byId = new Map(live.map((t) => [t.id, t]));
     const seated = this.attending.filter((id) => byId.has(id));
+    if (this.pinned !== null && byId.has(this.pinned) && !seated.includes(this.pinned)) {
+      seated.unshift(this.pinned);
+    }
     const queue = live
       .filter((t) => !seated.includes(t.id))
       .sort((a, b) => b.salience - a.salience);
@@ -666,6 +706,7 @@ export class Tracker {
       let weakest = Infinity;
       let seat = -1;
       seated.forEach((id, i) => {
+        if (id === this.pinned) return; // nobody takes the seat that was asked for
         const salience = byId.get(id)!.salience;
         if (salience < weakest) {
           weakest = salience;
@@ -676,6 +717,81 @@ export class Tracker {
       seated[seat] = challenger.id;
     }
     this.attending = seated.slice(0, limit);
+  }
+
+  /**
+   * Follow whatever is at this point, detected or not.
+   *
+   * Preferring the smallest box containing the point, because in a crowd the
+   * large ones are the background someone is pointing past. When nothing has been
+   * detected there at all, a track is minted from the pixels themselves — the
+   * detector's vocabulary is eighty nouns and the world is larger than that, and
+   * following something it has no word for is exactly what appearance is good at.
+   *
+   * Returns the track now being followed, or null if there was nothing there
+   * distinct enough to recognise again.
+   */
+  follow(point: { x: number; y: number }, frame: Frame, now: number): Track | null {
+    const holding = this.confirmed()
+      .filter(
+        (t) =>
+          point.x >= t.box.x1 && point.x <= t.box.x2 && point.y >= t.box.y1 && point.y <= t.box.y2,
+      )
+      .sort((a, b) => area(a.box) - area(b.box));
+
+    const chosen = holding[0];
+    if (chosen) {
+      this.pinned = chosen.id;
+      this.remember(chosen, frame);
+      this.attending = [chosen.id, ...this.attending.filter((id) => id !== chosen.id)];
+      return chosen;
+    }
+
+    const half = (this.frameSpan * POINTED_AT) / 2;
+    const box = {
+      x1: point.x - half,
+      y1: point.y - half,
+      x2: point.x + half,
+      y2: point.y + half,
+    };
+    const template = print(frame, box);
+    if (!template) return null; // nothing here distinct enough to find again
+
+    const track: Track = {
+      id: this.nextId++,
+      label: "this",
+      box,
+      velocity: { x: 0, y: 0 },
+      score: 1,
+      hits: MIN_HITS,
+      misses: 0,
+      firstSeen: now,
+      lastSeen: now,
+      lastDetected: now,
+      area: area(box) / this.frameArea,
+      areaTrend: "steady",
+      travelled: 0,
+      pace: 0,
+      salience: 1,
+      background: false,
+      template,
+      lock: 1,
+      lockable: enough(frame, box),
+    };
+    this.tracks.push(track);
+    this.pinned = track.id;
+    this.attending = [track.id, ...this.attending];
+    return track;
+  }
+
+  /** Stop following by hand, and let salience decide again. */
+  release() {
+    this.pinned = null;
+  }
+
+  /** The track someone asked to follow, if it is still here. */
+  following(): Track | null {
+    return this.tracks.find((t) => t.id === this.pinned) ?? null;
   }
 
   /** Everything currently held, scenery included. */
@@ -743,6 +859,7 @@ export class Tracker {
     this.nextId = 1;
     this.attending = [];
     this.attendedAt = -1;
+    this.pinned = null;
     this.cadence = 0;
     this.lastUpdate = -1;
   }

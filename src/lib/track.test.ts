@@ -387,3 +387,74 @@ test("two tracks cannot both claim the same subject", () => {
   const holding = t.all().filter((track) => track.lock >= LOCK_KEEP);
   assert.equal(holding.length, 1, `${holding.length} tracks claimed one subject`);
 });
+
+/* Following something because a person asked, rather than because it is salient. */
+
+test("clicking a tracked thing follows it", () => {
+  const t = watching();
+  const followed = t.follow({ x: 128, y: 108 }, lit(100, 80), 400);
+  assert.ok(followed, "nothing was picked up");
+  assert.equal(t.following()?.id, followed.id);
+});
+
+test("clicking bare pixels follows something the detector never found", () => {
+  const t = new Tracker(FRAME.width * FRAME.height);
+  const followed = t.follow({ x: 128, y: 108 }, lit(100, 80), 0);
+  assert.ok(followed, "a subject the detector has no word for was not followed");
+  assert.equal(followed.label, "this");
+  // And it is then held by looking, like anything else.
+  t.look(lit(112, 92), 100);
+  const [shown] = t.salient(100);
+  assert.ok(shown, "it was not being watched");
+  assert.ok(shown.lock >= LOCK_KEEP, `lock fell to ${shown.lock.toFixed(2)}`);
+});
+
+test("clicking empty sky follows nothing, rather than an invisible box", () => {
+  const t = new Tracker(FRAME.width * FRAME.height);
+  assert.equal(t.follow({ x: 20, y: 20 }, lit(200, 150), 0), null);
+});
+
+test("what someone asked to follow is not displaced by something more salient", () => {
+  const t = new Tracker(FRAME.width * FRAME.height);
+  const frame = lit(100, 80);
+  // A subject standing still, followed by hand.
+  t.update([seen("dog", boxAt(100, 80))], 0, frame);
+  t.update([seen("dog", boxAt(100, 80))], 300, frame);
+  const mine = t.follow({ x: 128, y: 108 }, frame, 300);
+  assert.ok(mine);
+  // Three livelier things arrive and cross the frame.
+  for (let i = 0; i < 10; i++) {
+    const at = 600 + i * 300;
+    t.update(
+      [
+        seen("dog", boxAt(100, 80)),
+        seen("car", box(i * 40, 10, 80, 80)),
+        seen("car", box(500 - i * 40, 150, 80, 80)),
+        seen("person", box(i * 45, 300, 80, 80)),
+      ],
+      at,
+      frame,
+    );
+  }
+  const watched = t.salient(3600, 3).map((s) => s.id);
+  assert.ok(watched.includes(mine.id), `dropped what was asked for; watching ${watched.join(",")}`);
+});
+
+test("a followed thing standing still never becomes scenery", () => {
+  const t = new Tracker(FRAME.width * FRAME.height);
+  const frame = lit(100, 80);
+  t.update([seen("dog", boxAt(100, 80))], 0, frame);
+  t.update([seen("dog", boxAt(100, 80))], 300, frame);
+  t.follow({ x: 128, y: 108 }, frame, 300);
+  for (let i = 0; i < 20; i++) t.update([seen("dog", boxAt(100, 80))], 600 + i * 300, frame);
+  const at = 600 + 20 * 300;
+  assert.equal(t.scenery(at).length, 0, "what was asked for was set aside as scenery");
+  assert.equal(t.salient(at).length, 1);
+});
+
+test("releasing hands the choice back to salience", () => {
+  const t = watching();
+  t.follow({ x: 128, y: 108 }, lit(100, 80), 400);
+  t.release();
+  assert.equal(t.following(), null);
+});
